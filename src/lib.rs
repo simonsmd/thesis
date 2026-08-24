@@ -1,13 +1,14 @@
 use std::fmt::Display;
-use std::io::BufRead;
+use std::io::Read;
 use std::str::Utf8Error;
 
+mod buffer;
 mod config;
 
-#[derive(Debug)]
-pub struct Dfa {
-    state: State,
-    position: Position,
+pub use buffer::{Buffer, DEFAULT_CAPACITY, Refill};
+
+#[derive(Debug, Clone)]
+pub struct Config {
     pub delimiter: u8,
     pub terminator: RecordTerminator,
     pub quote: Option<u8>,
@@ -19,11 +20,9 @@ pub struct Dfa {
     // pub ignore_emtpy_lines: bool,
 }
 
-impl Default for Dfa {
+impl Default for Config {
     fn default() -> Self {
         Self {
-            state: State::StartRecord,
-            position: Position::default(),
             delimiter: b',',
             terminator: RecordTerminator::CRLF,
             quote: Some(b'"'),
@@ -34,6 +33,49 @@ impl Default for Dfa {
             comment: Some(b'#'),
             // ignore_emtpy_lines: true,
         }
+    }
+}
+
+#[derive(Debug)]
+pub struct Parser<R: Read> {
+    state: State,
+    position: Position,
+    reader: R,
+    buffer: Buffer,
+    record_start: usize,
+    read_index: usize,
+    write_index: usize,
+    field_ends: Vec<usize>,
+    pub config: Config,
+}
+
+impl<R: Read> Parser<R> {
+    pub fn new(reader: R) -> Self {
+        Self::with_config(reader, Config::default())
+    }
+
+    pub fn with_config(reader: R, config: Config) -> Self {
+        Self::with_capacity(reader, config, DEFAULT_CAPACITY)
+    }
+
+    /// `capacity` is the read size; the buffer only grows past it for records
+    /// that do not fit.
+    pub fn with_capacity(reader: R, config: Config, capacity: usize) -> Self {
+        Self {
+            state: State::StartRecord,
+            position: Position::default(),
+            reader,
+            buffer: Buffer::with_capacity(capacity),
+            record_start: 0,
+            read_index: 0,
+            write_index: 0,
+            field_ends: Vec::new(),
+            config,
+        }
+    }
+
+    pub fn position(&self) -> Position {
+        self.position
     }
 }
 
@@ -50,7 +92,7 @@ impl Display for Position {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum RecordTerminator {
     CRLF,
     Byte(u8),
@@ -65,7 +107,7 @@ impl RecordTerminator {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QuoteStyle {
     /// Quotes can only start at the beginning of a field, otherwise quotes are not handled
     /// The boolean flag describes if quotes are allowed in unquoted fields
@@ -74,10 +116,9 @@ pub enum QuoteStyle {
     Toggle, // Concat, Always?
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum State {
     StartRecord,
-    StartField,
     InField,
     InQuotedField,
     EscapeSequenceInField,
@@ -120,7 +161,7 @@ impl std::error::Error for Error {
     }
 }
 
-impl Dfa {
+impl Config {
     fn transition(&self, state: &State, input: u8) -> (State, TransitionAction) {
         use State::*;
         use TransitionAction::*;
@@ -130,12 +171,7 @@ impl Dfa {
                     (StartRecord, Discard)
                 } else if self.comment == Some(input) {
                     (InComment, Discard)
-                } else {
-                    (StartField, Epsilon)
-                }
-            }
-            StartField => {
-                if self.quote == Some(input) {
+                } else if self.quote == Some(input) {
                     (InQuotedField, Discard)
                 } else {
                     (InField, Epsilon)
@@ -189,93 +225,102 @@ impl Dfa {
                     (InComment, Discard)
                 }
             }
-            EndField => (StartField, Epsilon),
+            EndField => {
+                if self.quote == Some(input) {
+                    (InQuotedField, Discard)
+                } else {
+                    (InField, Epsilon)
+                }
+            },
             EndRecord => (StartRecord, Epsilon),
             Error => (Error, Discard),
         }
     }
+}
 
-    pub fn read_record(
-        &mut self,
-        reader: &mut impl BufRead,
-        record: &mut Record,
-    ) -> Result<bool, Error> {
-        record.clear();
+impl<R: Read> Parser<R> {
+    pub fn read_record(&mut self) -> Result<Option<Record<'_>>, Error> {
+        self.record_start = self.write_index;
+        self.field_ends.clear();
         self.position.field = 0;
-        let mut input_index = 0;
-        let mut input = reader.fill_buf().map_err(Error::IO)?;
-        loop {
-            if input_index >= input.len() {
-                let consumed = input.len();
-                reader.consume(consumed);
-                self.position.byte += consumed;
-                input = reader.fill_buf().map_err(Error::IO)?;
-                input_index = 0;
-                if input.is_empty() {
+
+        'record: loop {
+            if self.read_index == self.buffer.len() {
+                let Refill { shift, read } = self
+                    .buffer
+                    .fill(&mut self.reader, self.record_start, self.write_index)
+                    .map_err(Error::IO)?;
+                self.record_start -= shift;
+                self.write_index -= shift;
+                self.read_index = self.write_index;
+
+                if read == 0 {
+                    // TODO: any other states that should result in an error?
                     if self.state == State::InQuotedField
-                        && matches!(self.quote_style, QuoteStyle::Strict(_))
+                        && matches!(self.config.quote_style, QuoteStyle::Strict(_))
                     {
+                        self.position.byte = self.buffer.source_offset(self.read_index);
                         return Err(Error::Parser(self.position));
                     }
 
-                    if record.buffer.is_empty() && record.field_ends.is_empty() {
-                        return Ok(false);
+                    if self.write_index == self.record_start && self.field_ends.is_empty() {
+                        return Ok(None);
                     }
-                    record.field_ends.push(record.buffer.len());
-                    break;
+                    self.field_ends.push(self.write_index - self.record_start);
+                    break 'record;
                 }
             }
 
-            let (new_state, action) = self.transition(&self.state, input[input_index]);
-            self.state = new_state;
+            let data = self.buffer.data_mut();
+            while self.read_index < data.len() {
+                let (state, action) = self.config.transition(&self.state, data[self.read_index]);
+                self.state = state;
 
-            if self.state == State::Error {
-                reader.consume(input_index);
-                self.position.byte += input_index;
-                return Err(Error::Parser(self.position));
-            }
+                if self.state == State::Error {
+                    break 'record;
+                }
 
-            if action == TransitionAction::Output {
-                record.buffer.push(input[input_index]);
-            }
-            if action != TransitionAction::Epsilon {
-                input_index += 1;
-            }
+                // TODO: is this or branch faster?
+                data[self.write_index] = data[self.read_index];
+                self.write_index += (action == TransitionAction::Output) as usize;
+                self.read_index += (action != TransitionAction::Epsilon) as usize;
 
-            if self.state == State::EndField || self.state == State::EndRecord {
-                record.field_ends.push(record.buffer.len());
-                self.position.field += 1;
-            }
+                if self.state == State::EndField || self.state == State::EndRecord {
+                    self.field_ends.push(self.write_index - self.record_start);
+                    self.position.field += 1;
+                }
 
-            if self.state == State::EndRecord {
-                break;
+                if self.state == State::EndRecord {
+                    break 'record;
+                }
             }
         }
 
+        self.position.byte = self.buffer.source_offset(self.read_index);
+        if self.state == State::Error {
+            return Err(Error::Parser(self.position));
+        }
+
         self.position.record += 1;
-        self.position.byte += input_index;
-        reader.consume(input_index);
-        Ok(true)
+        Ok(Some(self.record()))
     }
 
-    pub fn read_record_zerocopy(&mut self, reader: &mut impl BufRead, record: &mut Record) -> Result<bool, Error> {
-        Ok(true)
+    /// The record assembled so far.
+    fn record(&self) -> Record<'_> {
+        Record {
+            buffer: &self.buffer.data()[self.record_start..self.write_index],
+            field_ends: &self.field_ends,
+        }
     }
-
 }
 
-
-#[derive(Debug, Default, Clone)]
-pub struct Record {
-    buffer: Vec<u8>,
-    field_ends: Vec<usize>,
+#[derive(Debug, Clone, Copy)]
+pub struct Record<'a> {
+    buffer: &'a [u8],
+    field_ends: &'a [usize],
 }
 
-impl Record {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
+impl<'a> Record<'a> {
     /// Number of fields in the record.
     pub fn len(&self) -> usize {
         self.field_ends.len()
@@ -286,7 +331,7 @@ impl Record {
     }
 
     /// The raw bytes of field `index`, or `None` if out of range.
-    pub fn get(&self, index: usize) -> Option<&[u8]> {
+    pub fn get(&self, index: usize) -> Option<&'a [u8]> {
         let end = *self.field_ends.get(index)?;
         let start = if index == 0 {
             0
@@ -297,42 +342,83 @@ impl Record {
     }
 
     /// Iterate over the fields as byte slices.
-    pub fn iter(&self) -> impl Iterator<Item = &[u8]> {
-        // TODO: use manual loop to avoid bound checks in get
-        (0..self.len()).map(move |i| self.get(i).unwrap())
+    pub fn iter(&self) -> Fields<'a> {
+        Fields {
+            buffer: self.buffer,
+            field_ends: self.field_ends.iter(),
+            start: 0,
+        }
     }
 
-    pub fn get_str(&self, i: usize) -> Option<Result<&str, Utf8Error>> {
+    pub fn get_str(&self, i: usize) -> Option<Result<&'a str, Utf8Error>> {
         self.get(i).map(std::str::from_utf8)
     }
-    pub fn iter_str(&self) -> impl Iterator<Item = Result<&str, Utf8Error>> {
+
+    pub fn iter_str(&self) -> impl Iterator<Item = Result<&'a str, Utf8Error>> {
         self.iter().map(std::str::from_utf8)
     }
+}
 
-    fn clear(&mut self) {
-        self.buffer.clear();
-        self.field_ends.clear();
+impl<'a> IntoIterator for Record<'a> {
+    type Item = &'a [u8];
+    type IntoIter = Fields<'a>;
+
+    fn into_iter(self) -> Fields<'a> {
+        self.iter()
     }
 }
+
+/// Iterator over the fields of a [`Record`].
+#[derive(Debug, Clone)]
+pub struct Fields<'a> {
+    buffer: &'a [u8],
+    field_ends: std::slice::Iter<'a, usize>,
+    start: usize,
+}
+
+impl<'a> Iterator for Fields<'a> {
+    type Item = &'a [u8];
+
+    fn next(&mut self) -> Option<&'a [u8]> {
+        let end = *self.field_ends.next()?;
+        let field = &self.buffer[self.start..end];
+        self.start = end;
+        Some(field)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.field_ends.size_hint()
+    }
+}
+
+impl ExactSizeIterator for Fields<'_> {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::BufReader;
 
     /// Parse `input` to completion, returning each record as a `Vec<String>`.
     /// Panics on any parser/IO error; use [`try_parse`] to inspect the error.
-    fn parse(dfa: &mut Dfa, input: &[u8]) -> Vec<Vec<String>> {
-        try_parse(dfa, input).unwrap()
+    fn parse(config: &Config, input: &[u8]) -> Vec<Vec<String>> {
+        try_parse(config, input).unwrap()
     }
 
     /// Like [`parse`], but surfaces the first parser/IO error instead of
     /// panicking. Records parsed before the error are discarded.
-    fn try_parse(dfa: &mut Dfa, input: &[u8]) -> Result<Vec<Vec<String>>, Error> {
-        let mut reader = BufReader::new(input);
-        let mut record = Record::new();
+    fn try_parse(config: &Config, input: &[u8]) -> Result<Vec<Vec<String>>, Error> {
+        parse_with_capacity(config, input, DEFAULT_CAPACITY)
+    }
+
+    /// [`try_parse`] with an explicit buffer size, to exercise refills in the
+    /// middle of a record.
+    fn parse_with_capacity(
+        config: &Config,
+        input: &[u8],
+        capacity: usize,
+    ) -> Result<Vec<Vec<String>>, Error> {
+        let mut parser = Parser::with_capacity(input, config.clone(), capacity);
         let mut out = Vec::new();
-        while dfa.read_record(&mut reader, &mut record)? {
+        while let Some(record) = parser.read_record()? {
             out.push(
                 record
                     .iter()
@@ -355,9 +441,9 @@ mod tests {
 
     #[test]
     fn simple_records() {
-        let mut dfa = Dfa::default();
+        let dfa = Config::default();
         assert_eq!(
-            parse(&mut dfa, b"a,b,c\nd,e,f\n"),
+            parse(&dfa, b"a,b,c\nd,e,f\n"),
             rows(&[&["a", "b", "c"], &["d", "e", "f"]]),
         );
     }
@@ -365,86 +451,116 @@ mod tests {
     #[test]
     fn no_trailing_newline() {
         // A final record without a terminator is still emitted.
-        let mut dfa = Dfa::default();
-        assert_eq!(parse(&mut dfa, b"a,b,c"), rows(&[&["a", "b", "c"]]));
+        let dfa = Config::default();
+        assert_eq!(parse(&dfa, b"a,b,c"), rows(&[&["a", "b", "c"]]));
     }
 
     #[test]
     fn empty_fields() {
-        let mut dfa = Dfa::default();
-        assert_eq!(parse(&mut dfa, b"a,,c\n"), rows(&[&["a", "", "c"]]));
-        assert_eq!(parse(&mut dfa, b",\n"), rows(&[&["", ""]]));
+        let dfa = Config::default();
+        assert_eq!(parse(&dfa, b"a,,c\n"), rows(&[&["a", "", "c"]]));
+        assert_eq!(parse(&dfa, b",\n"), rows(&[&["", ""]]));
     }
 
     #[test]
     fn trailing_empty_field() {
         // A trailing delimiter before a terminator yields an empty last field.
-        let mut dfa = Dfa::default();
-        assert_eq!(parse(&mut dfa, b"a,\n"), rows(&[&["a", ""]]));
+        let dfa = Config::default();
+        assert_eq!(parse(&dfa, b"a,\n"), rows(&[&["a", ""]]));
     }
 
     #[test]
     fn trailing_empty_field_at_eof() {
         // A trailing delimiter with no terminator still yields the empty field.
-        let mut dfa = Dfa::default();
-        assert_eq!(parse(&mut dfa, b"a,"), rows(&[&["a", ""]]));
-        let mut dfa = Dfa::default();
-        assert_eq!(parse(&mut dfa, b"a,b,"), rows(&[&["a", "b", ""]]));
-        let mut dfa = Dfa::default();
-        assert_eq!(parse(&mut dfa, b","), rows(&[&["", ""]]));
+        let dfa = Config::default();
+        assert_eq!(parse(&dfa, b"a,"), rows(&[&["a", ""]]));
+        let dfa = Config::default();
+        assert_eq!(parse(&dfa, b"a,b,"), rows(&[&["a", "b", ""]]));
+        let dfa = Config::default();
+        assert_eq!(parse(&dfa, b","), rows(&[&["", ""]]));
     }
 
     #[test]
     fn whitespace_is_significant() {
-        let mut dfa = Dfa::default();
-        assert_eq!(parse(&mut dfa, b" a , b \n"), rows(&[&[" a ", " b "]]));
+        let dfa = Config::default();
+        assert_eq!(parse(&dfa, b" a , b \n"), rows(&[&[" a ", " b "]]));
+    }
+
+    // ---- buffering --------------------------------------------------------
+
+    #[test]
+    fn refills_in_the_middle_of_a_record() {
+        // Every buffer size must give the same records: a record that does not
+        // fit grows the buffer instead of being cut in two.
+        let input = b"a,b,c\n\"quoted, with a delimiter\",\"esc\\\"aped\",x\n#comment\nlast,record\n";
+        let expected = rows(&[
+            &["a", "b", "c"],
+            &["quoted, with a delimiter", "esc\"aped", "x"],
+            &["last", "record"],
+        ]);
+
+        for capacity in [1, 2, 3, 5, 8, 16, 64, 4096] {
+            let parsed = parse_with_capacity(&Config::default(), input, capacity).unwrap();
+            assert_eq!(parsed, expected, "with a {capacity} byte buffer");
+        }
+    }
+
+    #[test]
+    fn a_record_longer_than_the_buffer_grows_it() {
+        let field = "x".repeat(10_000);
+        let input = format!("{field},{field}\nsmall,record\n");
+        let parsed = parse_with_capacity(&Config::default(), input.as_bytes(), 8).unwrap();
+        assert_eq!(
+            parsed,
+            rows(&[&[&field, &field], &["small", "record"]]),
+        );
     }
 
     // ---- terminators ------------------------------------------------------
 
     #[test]
     fn crlf_terminator() {
-        let mut dfa = Dfa::default();
+        let dfa = Config::default();
         assert_eq!(
-            parse(&mut dfa, b"a,b\r\nc,d\r\n"),
+            parse(&dfa, b"a,b\r\nc,d\r\n"),
             rows(&[&["a", "b"], &["c", "d"]]),
         );
     }
 
     #[test]
     fn bare_cr_terminator() {
-        let mut dfa = Dfa::default();
-        assert_eq!(parse(&mut dfa, b"a\rb\r"), rows(&[&["a"], &["b"]]));
+        let dfa = Config::default();
+        assert_eq!(parse(&dfa, b"a\rb\r"), rows(&[&["a"], &["b"]]));
     }
 
     #[test]
     fn custom_byte_terminator_keeps_cr() {
         // With a plain '\n' terminator, '\r' is an ordinary field byte.
-        let mut dfa = Dfa::default();
+        let mut dfa = Config::default();
         dfa.terminator = RecordTerminator::Byte(b'\n');
-        assert_eq!(parse(&mut dfa, b"a\r\nb\n"), rows(&[&["a\r"], &["b"]]));
+        assert_eq!(parse(&dfa, b"a\r\nb\n"), rows(&[&["a\r"], &["b"]]));
     }
 
     #[test]
     fn blank_lines_are_skipped() {
-        let mut dfa = Dfa::default();
-        assert_eq!(parse(&mut dfa, b"a\n\r\r\n\n\rb\n"), rows(&[&["a"], &["b"]]));
+        let dfa = Config::default();
+        assert_eq!(parse(&dfa, b"a\n\r\r\n\n\rb\n"), rows(&[&["a"], &["b"]]));
     }
 
     // ---- quoting ----------------------------------------------------------
 
     #[test]
     fn quoted_fields() {
-        let mut dfa = Dfa::default();
-        assert_eq!(parse(&mut dfa, b"\"a\",\"b\"\n"), rows(&[&["a", "b"]]));
+        let dfa = Config::default();
+        assert_eq!(parse(&dfa, b"\"a\",\"b\"\n"), rows(&[&["a", "b"]]));
     }
 
     #[test]
     fn quoted_delimiter_and_newline() {
         // Delimiters and newlines inside quotes are literal.
-        let mut dfa = Dfa::default();
+        let dfa = Config::default();
         assert_eq!(
-            parse(&mut dfa, b"\"a,b\",\"c\nd\"\n"),
+            parse(&dfa, b"\"a,b\",\"c\nd\"\n"),
             rows(&[&["a,b", "c\nd"]]),
         );
     }
@@ -452,45 +568,45 @@ mod tests {
     #[test]
     fn quoted_empty_field_vs_blank_line() {
         // "" is one empty field; a blank line is no record at all.
-        let mut dfa = Dfa::default();
-        assert_eq!(parse(&mut dfa, b"\"\"\n"), rows(&[&[""]]));
+        let dfa = Config::default();
+        assert_eq!(parse(&dfa, b"\"\"\n"), rows(&[&[""]]));
     }
 
     #[test]
     fn doubled_quote_escape() {
         // "a""b" -> a"b  (RFC 4180 doubling)
-        let mut dfa = Dfa::default();
-        assert_eq!(parse(&mut dfa, b"\"a\"\"b\",c\n"), rows(&[&["a\"b", "c"]]));
+        let dfa = Config::default();
+        assert_eq!(parse(&dfa, b"\"a\"\"b\",c\n"), rows(&[&["a\"b", "c"]]));
     }
 
     #[test]
     fn concat_quoted_then_unquoted() {
         // Concat mode joins a quoted region with adjacent unquoted text.
-        let mut dfa = Dfa::default();
-        assert_eq!(parse(&mut dfa, b"\"a\"b,c\n"), rows(&[&["ab", "c"]]));
+        let dfa = Config::default();
+        assert_eq!(parse(&dfa, b"\"a\"b,c\n"), rows(&[&["ab", "c"]]));
     }
 
     #[test]
     fn concat_unquoted_then_quoted() {
         // ...and a quote can open a quoted region mid-field.
-        let mut dfa = Dfa::default();
-        assert_eq!(parse(&mut dfa, b"a\"b\",c\n"), rows(&[&["ab", "c"]]));
+        let dfa = Config::default();
+        assert_eq!(parse(&dfa, b"a\"b\",c\n"), rows(&[&["ab", "c"]]));
     }
     
     #[test]
     fn toggle_with_double_quote_escape() {
         // handle a double quote as a literal quote in toggle mode
-        let mut dfa = Dfa::default();
-        assert_eq!(parse(&mut dfa, b"\"a\"\"b,\",c,\"a\"\"\"b,d\n"), rows(&[&["a\"b,", "c", "a\"b", "d"]]));
+        let dfa = Config::default();
+        assert_eq!(parse(&dfa, b"\"a\"\"b,\",c,\"a\"\"\"b,d\n"), rows(&[&["a\"b,", "c", "a\"b", "d"]]));
     }
 
     #[test]
     fn strict_mode_rejects_inner_quote() {
         // In Strict mode a quote that isn't at field start is a parser error,
         // reported at the offending byte.
-        let mut dfa = Dfa::default();
+        let mut dfa = Config::default();
         dfa.quote_style = QuoteStyle::Strict(false);
-        let err = try_parse(&mut dfa, b"a\"b\",c\n").unwrap_err();
+        let err = try_parse(&dfa, b"a\"b\",c\n").unwrap_err();
         match err {
             Error::Parser(pos) => assert_eq!(pos.byte, 1),
             other => panic!("expected parser error, got {other:?}"),
@@ -500,40 +616,40 @@ mod tests {
     #[test]
     fn strict_mode_rejects_trailing_garbage_after_quote() {
         // After a closing quote, only a delimiter or terminator is allowed.
-        let mut dfa = Dfa::default();
+        let mut dfa = Config::default();
         dfa.quote_style = QuoteStyle::Strict(false);
-        let err = try_parse(&mut dfa, b"\"ab\"c\n").unwrap_err();
+        let err = try_parse(&dfa, b"\"ab\"c\n").unwrap_err();
         assert!(matches!(err, Error::Parser(_)));
     }
 
     #[test]
     fn strict_mode_rejects_unclosed_quote_at_eof() {
         // An unclosed quote at EOF is a parser error
-        let mut dfa = Dfa::default();
+        let mut dfa = Config::default();
         dfa.quote_style = QuoteStyle::Strict(false);
-        let err = try_parse(&mut dfa, b"\"ab").unwrap_err();
+        let err = try_parse(&dfa, b"\"ab").unwrap_err();
         assert!(matches!(err, Error::Parser(_)));
     }
 
     #[test]
     fn unterminated_quote_at_eof() {
         // An unclosed quote at EOF yields whatever was accumulated.
-        let mut dfa = Dfa::default();
-        assert_eq!(parse(&mut dfa, b"\"abc"), rows(&[&["abc"]]));
+        let dfa = Config::default();
+        assert_eq!(parse(&dfa, b"\"abc"), rows(&[&["abc"]]));
     }
 
     #[test]
     fn disabled_quoting() {
-        let mut dfa = Dfa::default();
+        let mut dfa = Config::default();
         dfa.quote = None;
-        assert_eq!(parse(&mut dfa, b"\"a\",b\n"), rows(&[&["\"a\"", "b"]]));
+        assert_eq!(parse(&dfa, b"\"a\",b\n"), rows(&[&["\"a\"", "b"]]));
     }
 
     #[test]
     fn disabled_double_quote_escape() {
-        let mut dfa = Dfa::default();
+        let mut dfa = Config::default();
         dfa.double_quote_escape = false;
-        assert_eq!(parse(&mut dfa, b"\"a\"\"b\",b\n"), rows(&[&["ab", "b"]]));
+        assert_eq!(parse(&dfa, b"\"a\"\"b\",b\n"), rows(&[&["ab", "b"]]));
     }
 
     // ---- escapes ----------------------------------------------------------
@@ -541,36 +657,36 @@ mod tests {
     #[test]
     fn escaped_delimiter_unquoted() {
         // Backslash escapes a delimiter in an unquoted field.
-        let mut dfa = Dfa::default();
-        assert_eq!(parse(&mut dfa, b"a\\,b,c\n"), rows(&[&["a,b", "c"]]));
+        let dfa = Config::default();
+        assert_eq!(parse(&dfa, b"a\\,b,c\n"), rows(&[&["a,b", "c"]]));
     }
 
     #[test]
     fn escaped_quote_in_quoted_field() {
-        let mut dfa = Dfa::default();
-        assert_eq!(parse(&mut dfa, b"\"a\\\"b\",c\n"), rows(&[&["a\"b", "c"]]));
+        let dfa = Config::default();
+        assert_eq!(parse(&dfa, b"\"a\\\"b\",c\n"), rows(&[&["a\"b", "c"]]));
     }
 
     #[test]
     fn escaped_backslash() {
-        let mut dfa = Dfa::default();
-        assert_eq!(parse(&mut dfa, b"a\\\\b\n"), rows(&[&["a\\b"]]));
+        let dfa = Config::default();
+        assert_eq!(parse(&dfa, b"a\\\\b\n"), rows(&[&["a\\b"]]));
     }
 
     #[test]
     fn disabled_escape_keeps_backslash() {
-        let mut dfa = Dfa::default();
+        let mut dfa = Config::default();
         dfa.escape = None;
-        assert_eq!(parse(&mut dfa, b"a\\b\n"), rows(&[&["a\\b"]]));
+        assert_eq!(parse(&dfa, b"a\\b\n"), rows(&[&["a\\b"]]));
     }
 
     // ---- comments ---------------------------------------------------------
 
     #[test]
     fn comment_lines_are_skipped() {
-        let mut dfa = Dfa::default();
+        let dfa = Config::default();
         assert_eq!(
-            parse(&mut dfa, b"#comment\na,b\n#another\nc,d\n"),
+            parse(&dfa, b"#comment\na,b\n#another\nc,d\n"),
             rows(&[&["a", "b"], &["c", "d"]]),
         );
     }
@@ -578,8 +694,8 @@ mod tests {
     #[test]
     fn hash_is_literal_mid_field() {
         // '#' only starts a comment at the beginning of a record.
-        let mut dfa = Dfa::default();
-        assert_eq!(parse(&mut dfa, b"a#b,c\n"), rows(&[&["a#b", "c"]]));
+        let dfa = Config::default();
+        assert_eq!(parse(&dfa, b"a#b,c\n"), rows(&[&["a#b", "c"]]));
     }
 
     // ---- strict-mode literal quotes in unquoted fields --------------------
@@ -587,27 +703,27 @@ mod tests {
     #[test]
     fn strict_true_allows_literal_quote_in_unquoted_field() {
         // Strict(true): a quote that isn't at field start is an ordinary byte.
-        let mut dfa = Dfa::default();
+        let mut dfa = Config::default();
         dfa.quote_style = QuoteStyle::Strict(true);
-        assert_eq!(parse(&mut dfa, b"a\"b,c\n"), rows(&[&["a\"b", "c"]]));
+        assert_eq!(parse(&dfa, b"a\"b,c\n"), rows(&[&["a\"b", "c"]]));
     }
 
     #[test]
     fn strict_true_still_treats_leading_quote_as_quoting() {
         // The flag only affects mid-field quotes; a field that opens with a
         // quote is still a quoted field.
-        let mut dfa = Dfa::default();
+        let mut dfa = Config::default();
         dfa.quote_style = QuoteStyle::Strict(true);
-        assert_eq!(parse(&mut dfa, b"\"a,b\",c\n"), rows(&[&["a,b", "c"]]));
+        assert_eq!(parse(&dfa, b"\"a,b\",c\n"), rows(&[&["a,b", "c"]]));
     }
 
     #[test]
     fn strict_true_still_rejects_garbage_after_close() {
         // The flag does not relax the post-close rule: after a *closing* quote
         // only a delimiter or terminator is allowed.
-        let mut dfa = Dfa::default();
+        let mut dfa = Config::default();
         dfa.quote_style = QuoteStyle::Strict(true);
-        let err = try_parse(&mut dfa, b"\"ab\"c\n").unwrap_err();
+        let err = try_parse(&dfa, b"\"ab\"c\n").unwrap_err();
         assert!(matches!(err, Error::Parser(_)));
     }
 
@@ -616,13 +732,13 @@ mod tests {
     #[test]
     fn escape_disabled_in_unquoted_fields() {
         // With escapes off in unquoted fields, a backslash there is literal...
-        let mut dfa = Dfa::default();
+        let mut dfa = Config::default();
         dfa.escape_in_unquoted_fields = false;
-        assert_eq!(parse(&mut dfa, b"a\\b\n"), rows(&[&["a\\b"]]));
+        assert_eq!(parse(&dfa, b"a\\b\n"), rows(&[&["a\\b"]]));
         // ...but escapes still apply inside quoted fields.
-        let mut dfa = Dfa::default();
+        let mut dfa = Config::default();
         dfa.escape_in_unquoted_fields = false;
-        assert_eq!(parse(&mut dfa, b"\"a\\\"b\"\n"), rows(&[&["a\"b"]]));
+        assert_eq!(parse(&dfa, b"\"a\\\"b\"\n"), rows(&[&["a\"b"]]));
     }
 
     // ---- error position reporting ----------------------------------------
@@ -630,9 +746,9 @@ mod tests {
     #[test]
     fn parser_error_reports_record_and_field() {
         // Error in the 2nd record (index 1), 2nd field (index 1).
-        let mut dfa = Dfa::default();
+        let mut dfa = Config::default();
         dfa.quote_style = QuoteStyle::Strict(false);
-        let err = try_parse(&mut dfa, b"a,b,c\nd,e\"f\n").unwrap_err();
+        let err = try_parse(&dfa, b"a,b,c\nd,e\"f\n").unwrap_err();
         match err {
             Error::Parser(pos) => {
                 assert_eq!(pos.record, 1);
@@ -644,9 +760,9 @@ mod tests {
 
     #[test]
     fn parser_error_byte_offset_across_records() {
-        let mut dfa = Dfa::default();
+        let mut dfa = Config::default();
         dfa.quote_style = QuoteStyle::Strict(false);
-        let err = try_parse(&mut dfa, b"a,b,c\nd,e\"f\n").unwrap_err();
+        let err = try_parse(&dfa, b"a,b,c\nd,e\"f\n").unwrap_err();
         match err {
             // The offending quote is at absolute byte 9, not 3.
             Error::Parser(pos) => assert_eq!(pos.byte, 9),
@@ -658,11 +774,11 @@ mod tests {
 
     #[test]
     fn custom_delimiter_and_quote() {
-        let mut dfa = Dfa::default();
+        let mut dfa = Config::default();
         dfa.delimiter = b'\t';
         dfa.quote = Some(b'\'');
         assert_eq!(
-            parse(&mut dfa, b"'a\tb'\tc\n"),
+            parse(&dfa, b"'a\tb'\tc\n"),
             rows(&[&["a\tb", "c"]]),
         );
     }
