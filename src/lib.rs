@@ -47,6 +47,7 @@ pub struct Parser<R: Read> {
     write_index: usize,
     field_ends: Vec<usize>,
     pub config: Config,
+    bitshift_table: [u64; 256],
 }
 
 impl<R: Read> Parser<R> {
@@ -61,7 +62,7 @@ impl<R: Read> Parser<R> {
     /// `capacity` is the read size; the buffer only grows past it for records
     /// that do not fit.
     pub fn with_capacity(reader: R, config: Config, capacity: usize) -> Self {
-        Self {
+        let mut parser = Self {
             state: State::StartRecord,
             position: Position::default(),
             reader,
@@ -71,7 +72,10 @@ impl<R: Read> Parser<R> {
             write_index: 0,
             field_ends: Vec::new(),
             config,
-        }
+            bitshift_table: [0; 256],
+        };
+        parser.build_transition_table();
+        parser
     }
 
     pub fn position(&self) -> Position {
@@ -116,19 +120,54 @@ pub enum QuoteStyle {
     Toggle, // Concat, Always?
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+// TODO: should be copy?
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum State {
-    StartRecord,
-    InField,
-    InQuotedField,
-    EscapeSequenceInField,
-    EscapeSequenceInQuotedField,
-    AfterQuote,
-    InComment,
-    EndField,
-    EndRecord,
-    Error,
+    StartRecord = 12,
+    InField = 0,
+    InQuotedFieldOutput = 6,
+    InQuotedFieldDiscard = 18,
+    EscapeSequenceInField = 24,
+    EscapeSequenceInQuotedField = 30,
+    AfterQuote = 36,
+    InComment = 42,
+    EndField = 48,
+    EndRecord = 54,
+    Error = 60,
 }
+
+/// One state entry of a transition row.
+const STATE_MASK: u64 = 0b11_1111;
+
+impl State {
+    /// Inverse of `state as u64`, for the entries read out of a transition row.
+    fn from_bits(bits: u64) -> State {
+        use State::*;
+        match bits {
+            0 => InField,
+            6 => InQuotedFieldOutput,
+            12 => StartRecord,
+            18 => InQuotedFieldDiscard,
+            24 => EscapeSequenceInField,
+            30 => EscapeSequenceInQuotedField,
+            36 => AfterQuote,
+            42 => InComment,
+            48 => EndField,
+            54 => EndRecord,
+            _ => Error,
+        }
+    }
+}
+
+/// Both take the raw `state as u64` so the hot loop does not have to convert back.
+fn is_output(state: u64) -> bool {
+    state <= State::InQuotedFieldOutput as u64
+}
+
+fn is_field_emit(state: u64) -> bool {
+    state >= State::EndField as u64
+}
+
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum TransitionAction {
@@ -161,82 +200,93 @@ impl std::error::Error for Error {
     }
 }
 
-impl Config {
-    fn transition(&self, state: &State, input: u8) -> (State, TransitionAction) {
-        use State::*;
-        use TransitionAction::*;
-        match state {
-            StartRecord => {
-                if self.terminator.equals(input) {
-                    (StartRecord, Discard)
-                } else if self.comment == Some(input) {
-                    (InComment, Discard)
-                } else if self.quote == Some(input) {
-                    (InQuotedField, Discard)
-                } else {
-                    (InField, Epsilon)
-                }
+fn transition(config: &Config, state: State, input: u8) -> (State, TransitionAction) {
+    use State::*;
+    use TransitionAction::*;
+    match state {
+        StartRecord => {
+            if config.terminator.equals(input) {
+                (StartRecord, Discard)
+            } else if config.comment == Some(input) {
+                (InComment, Discard)
+            } else if config.quote == Some(input) {
+                (InQuotedFieldDiscard, Discard)
+            } else {
+                (InField, Epsilon)
             }
-            InField => {
-                if input == self.delimiter {
-                    (EndField, Discard)
-                } else if self.terminator.equals(input) {
-                    (EndRecord, Discard)
-                } else if self.quote == Some(input) {
-                    match self.quote_style {
-                        QuoteStyle::Strict(false) => (Error, Discard),
-                        QuoteStyle::Strict(true) => (InField, Output),
-                        QuoteStyle::Toggle => (InQuotedField, Discard),
-                    }
-                } else if self.escape_in_unquoted_fields && self.escape == Some(input) {
-                    (EscapeSequenceInField, Discard)
-                } else {
-                    (InField, Output)
-                }
-            }
-            InQuotedField => {
-                if self.quote == Some(input) {
-                    (AfterQuote, Discard)
-                } else if self.escape == Some(input) {
-                    (EscapeSequenceInQuotedField, Discard)
-                } else {
-                    (InQuotedField, Output)
-                }
-            }
-            EscapeSequenceInField => (InField, Output),
-            EscapeSequenceInQuotedField => (InQuotedField, Output),
-            AfterQuote => {
-                if self.double_quote_escape && self.quote == Some(input) {
-                    (InQuotedField, Output)
-                } else if self.delimiter == input {
-                    (EndField, Discard)
-                } else if self.terminator.equals(input) {
-                    (EndRecord, Discard)
-                } else if matches!(self.quote_style, QuoteStyle::Strict(_)) {
-                    (Error, Discard)
-                } else {
-                    (InField, Epsilon)
-                }
-            }
-            InComment => {
-                if input == b'\n' {
-                    (StartRecord, Discard)
-                } else {
-                    (InComment, Discard)
-                }
-            }
-            EndField => {
-                if self.quote == Some(input) {
-                    (InQuotedField, Discard)
-                } else {
-                    (InField, Epsilon)
-                }
-            },
-            EndRecord => (StartRecord, Epsilon),
-            Error => (Error, Discard),
         }
+        InField => {
+            if input == config.delimiter {
+                (EndField, Discard)
+            } else if config.terminator.equals(input) {
+                (EndRecord, Discard)
+            } else if config.quote == Some(input) {
+                match config.quote_style {
+                    QuoteStyle::Strict(false) => (Error, Discard),
+                    QuoteStyle::Strict(true) => (InField, Output),
+                    QuoteStyle::Toggle => (InQuotedFieldDiscard, Discard),
+                }
+            } else if config.escape_in_unquoted_fields && config.escape == Some(input) {
+                (EscapeSequenceInField, Discard)
+            } else {
+                (InField, Output)
+            }
+        }
+        InQuotedFieldOutput => {
+            if config.quote == Some(input) {
+                (AfterQuote, Discard)
+            } else if config.escape == Some(input) {
+                (EscapeSequenceInQuotedField, Discard)
+            } else {
+                (InQuotedFieldOutput, Output)
+            }
+        }
+        InQuotedFieldDiscard => (InQuotedFieldOutput, Epsilon),
+        EscapeSequenceInField => (InField, Output),
+        EscapeSequenceInQuotedField => (InQuotedFieldOutput, Output),
+        AfterQuote => {
+            if config.double_quote_escape && config.quote == Some(input) {
+                (InQuotedFieldOutput, Output)
+            } else if config.delimiter == input {
+                (EndField, Discard)
+            } else if config.terminator.equals(input) {
+                (EndRecord, Discard)
+            } else if matches!(config.quote_style, QuoteStyle::Strict(_)) {
+                (Error, Discard)
+            } else {
+                (InField, Epsilon)
+            }
+        }
+        InComment => {
+            if input == b'\n' {
+                (StartRecord, Discard)
+            } else {
+                (InComment, Discard)
+            }
+        }
+        EndField => {
+            if config.quote == Some(input) {
+                (InQuotedFieldDiscard, Discard)
+            } else {
+                (InField, Epsilon)
+            }
+        },
+        EndRecord => (StartRecord, Epsilon),
+        Error => (Error, Discard),
     }
 }
+
+fn next_state(config: &Config, state: State, byte: u8) -> State {
+    let mut state = state;
+    loop {
+        let (next, action) = transition(config, state, byte);
+        if action != TransitionAction::Epsilon {
+            return next;
+        }
+        state = next;
+    }
+}
+
 
 impl<R: Read> Parser<R> {
     pub fn read_record(&mut self) -> Result<Option<Record<'_>>, Error> {
@@ -256,7 +306,7 @@ impl<R: Read> Parser<R> {
 
                 if read == 0 {
                     // TODO: any other states that should result in an error?
-                    if self.state == State::InQuotedField
+                    if (self.state == State::InQuotedFieldOutput || self.state == State::InQuotedFieldDiscard)
                         && matches!(self.config.quote_style, QuoteStyle::Strict(_))
                     {
                         self.position.byte = self.buffer.source_offset(self.read_index);
@@ -273,7 +323,7 @@ impl<R: Read> Parser<R> {
 
             let data = self.buffer.data_mut();
             while self.read_index < data.len() {
-                let (state, action) = self.config.transition(&self.state, data[self.read_index]);
+                let (state, action) = transition(&self.config, self.state, data[self.read_index]);
                 self.state = state;
 
                 if self.state == State::Error {
@@ -311,6 +361,108 @@ impl<R: Read> Parser<R> {
             buffer: &self.buffer.data()[self.record_start..self.write_index],
             field_ends: &self.field_ends,
         }
+    }
+
+    fn build_transition_table(&mut self) {
+        use State::*;
+        // Error does not fit and needs to be handled with a branch
+        const STATES: [State; 10] = [
+            StartRecord,
+            InField,
+            InQuotedFieldOutput,
+            InQuotedFieldDiscard,
+            EscapeSequenceInField,
+            EscapeSequenceInQuotedField,
+            AfterQuote,
+            InComment,
+            EndField,
+            EndRecord,
+        ];
+
+        for b in 0..=255_u8 {
+            let mut row: u64 = 0;
+
+            for state in STATES {
+                row |= (next_state(&self.config, state, b) as u64) << (state as u32);
+            }
+
+            self.bitshift_table[b as usize] = row;
+        }
+    }
+
+    pub fn read_record_bitshift(&mut self) -> Result<Option<Record<'_>>, Error> {
+        self.record_start = self.write_index;
+        self.field_ends.clear();
+        self.position.field = 0;
+
+        'record: loop {
+            if self.read_index == self.buffer.len() {
+                let Refill { shift, read } = self
+                    .buffer
+                    .fill(&mut self.reader, self.record_start, self.write_index)
+                    .map_err(Error::IO)?;
+                self.record_start -= shift;
+                self.write_index -= shift;
+                self.read_index = self.write_index;
+
+                if read == 0 {
+                    // TODO: any other states that should result in an error?
+                    if (self.state == State::InQuotedFieldOutput || self.state == State::InQuotedFieldDiscard)
+                        && matches!(self.config.quote_style, QuoteStyle::Strict(_))
+                    {
+                        self.position.byte = self.buffer.source_offset(self.read_index);
+                        return Err(Error::Parser(self.position));
+                    }
+
+                    if self.write_index == self.record_start && self.field_ends.is_empty() {
+                        return Ok(None);
+                    }
+                    self.field_ends.push(self.write_index - self.record_start);
+                    break 'record;
+                }
+            }
+
+            let table = &self.bitshift_table;
+            let data = self.buffer.data_mut();
+            // the table has no epsilon transitions, so every byte is consumed
+            let mut state = self.state as u64;
+
+            while self.read_index < data.len() {
+                let byte = data[self.read_index];
+                state = (table[byte as usize] >> state) & STATE_MASK;
+
+                data[self.write_index] = byte;
+                self.write_index += is_output(state) as usize;
+                self.read_index += 1;
+
+                if is_field_emit(state) {
+                    self.state = State::from_bits(state);
+
+                    if self.state == State::Error {
+                        // report the offending byte, which was not consumed
+                        self.read_index -= 1;
+                        break 'record;
+                    }
+
+                    self.field_ends.push(self.write_index - self.record_start);
+                    self.position.field += 1;
+
+                    if self.state == State::EndRecord {
+                        break 'record;
+                    }
+                }
+            }
+
+            self.state = State::from_bits(state);
+        }
+
+        self.position.byte = self.buffer.source_offset(self.read_index);
+        if self.state == State::Error {
+            return Err(Error::Parser(self.position));
+        }
+
+        self.position.record += 1;
+        Ok(Some(self.record()))
     }
 }
 
@@ -410,15 +562,38 @@ mod tests {
     }
 
     /// [`try_parse`] with an explicit buffer size, to exercise refills in the
-    /// middle of a record.
+    /// middle of a record. Every test runs through both parsers, which must
+    /// agree on the records and on the error, if any.
     fn parse_with_capacity(
         config: &Config,
         input: &[u8],
         capacity: usize,
     ) -> Result<Vec<Vec<String>>, Error> {
+        let branch = run(config, input, capacity, false);
+        let bitshift = run(config, input, capacity, true);
+        assert_eq!(
+            format!("{branch:?}"),
+            format!("{bitshift:?}"),
+            "the bitshift dfa disagrees with the branch parser",
+        );
+        branch
+    }
+
+    fn run(
+        config: &Config,
+        input: &[u8],
+        capacity: usize,
+        bitshift: bool,
+    ) -> Result<Vec<Vec<String>>, Error> {
         let mut parser = Parser::with_capacity(input, config.clone(), capacity);
         let mut out = Vec::new();
-        while let Some(record) = parser.read_record()? {
+        loop {
+            let record = if bitshift {
+                parser.read_record_bitshift()?
+            } else {
+                parser.read_record()?
+            };
+            let Some(record) = record else { break };
             out.push(
                 record
                     .iter()
