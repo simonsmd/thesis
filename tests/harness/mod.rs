@@ -13,6 +13,7 @@ use csv_parser::{
     config::Config,
     parser::{Dfa, Error, Parser},
     reference::ReferenceDfa,
+    table::TableDfa,
 };
 
 pub type Parsed = Result<Vec<Vec<String>>, Error>;
@@ -40,14 +41,24 @@ pub fn parse_with_capacity(config: &Config, input: &[u8], capacity: usize) -> Pa
         capacity,
     ));
 
-    for (name, actual) in [(
-        "bitshift",
-        drive(Parser::<_, BitshiftDfa>::with_capacity(
-            input,
-            config.clone(),
-            capacity,
-        )),
-    )] {
+    for (name, actual) in [
+        (
+            "bitshift",
+            drive(Parser::<_, BitshiftDfa>::with_capacity(
+                input,
+                config.clone(),
+                capacity,
+            )),
+        ),
+        (
+            "table",
+            drive(Parser::<_, TableDfa>::with_capacity(
+                input,
+                config.clone(),
+                capacity,
+            )),
+        ),
+    ] {
         assert_eq!(
             format!("{expected:?}"),
             format!("{actual:?}"),

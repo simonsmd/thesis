@@ -1,5 +1,5 @@
 use crate::{
-    config::{Config, QuoteStyle}, parser::{Dfa, DfaResult}, reference::{State, STATE_MASK, is_field_emit, is_output, next_state},
+    config::{Config, QuoteStyle}, parser::{Dfa, DfaResult}, reference::{State, STATE_MASK, is_field_emit, is_output, transition_next_state},
 };
 
 pub struct BitshiftDfa {
@@ -28,7 +28,7 @@ impl BitshiftDfa {
             let mut row: u64 = 0;
 
             for state in STATES {
-                row |= (next_state(config, state, b) as u64) << (state as u32);
+                row |= (transition_next_state(config, state, b).0 as u64) << (state as u32);
             }
 
             self.table[b as usize] = row;

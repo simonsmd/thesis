@@ -112,12 +112,12 @@ pub fn transition(config: &Config, state: State, input: u8) -> (State, Transitio
     }
 }
 
-pub fn next_state(config: &Config, state: State, byte: u8) -> State {
+pub fn transition_next_state(config: &Config, state: State, byte: u8) -> (State, TransitionAction) {
     let mut state = state;
     loop {
         let (next, action) = transition(config, state, byte);
         if action != TransitionAction::Epsilon {
-            return next;
+            return (next, action);
         }
         state = next;
     }
