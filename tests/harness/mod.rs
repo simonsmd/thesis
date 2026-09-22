@@ -8,12 +8,7 @@
 use std::io::Read;
 
 use csv_parser::{
-    DEFAULT_CAPACITY,
-    bitshift::BitshiftDfa,
-    config::Config,
-    parser::{Dfa, Error, Parser},
-    reference::ReferenceDfa,
-    table::TableDfa,
+    DEFAULT_CAPACITY, bitshift::BitshiftDfa, class::ClassDfa, config::Config, parser::{Dfa, Error, Parser}, reference::ReferenceDfa, table::TableDfa,
 };
 
 pub type Parsed = Result<Vec<Vec<String>>, Error>;
@@ -53,6 +48,14 @@ pub fn parse_with_capacity(config: &Config, input: &[u8], capacity: usize) -> Pa
         (
             "table",
             drive(Parser::<_, TableDfa>::with_capacity(
+                input,
+                config.clone(),
+                capacity,
+            )),
+        ),
+        (
+            "class",
+            drive(Parser::<_, ClassDfa>::with_capacity(
                 input,
                 config.clone(),
                 capacity,

@@ -4,5 +4,6 @@ mod buffer;
 pub mod reference;
 pub mod table;
 pub mod bitshift;
+pub mod class;
 
 pub use buffer::DEFAULT_CAPACITY;

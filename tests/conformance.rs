@@ -271,6 +271,17 @@ fn hash_is_literal_mid_field() {
     assert_eq!(parse(&config, b"a#b,c\n"), rows(&[&["a#b", "c"]]));
 }
 
+#[test]
+fn comment_ends_at_newline_with_a_custom_terminator() {
+    // A comment is closed by a literal '\n' whatever the terminator is, so
+    // '\n' stays significant even when it does not end records.
+    let config = Config::new().terminator(RecordTerminator::Byte(b';'));
+    assert_eq!(
+        parse(&config, b"#comment\na,b;c,d;"),
+        rows(&[&["a", "b"], &["c", "d"]]),
+    );
+}
+
 // ---- strict-mode literal quotes in unquoted fields --------------------
 
 #[test]
