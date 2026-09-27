@@ -81,6 +81,7 @@ impl Dfa for TableDfa {
         dfa
     }
 
+    #[inline]
     fn run(&mut self, buffer: &mut [u8], cursor: &mut Cursor, field_ends: &mut [usize]) -> DfaResult {
         let mut state = self.state;
         let mut read = cursor.read;
@@ -130,6 +131,7 @@ impl Dfa for TableDfa {
         result
     }
 
+    #[inline]
     fn finish(&self, config: &Config) -> DfaResult {
         let unterminated_quote = self.state == state_to_index(State::InQuotedFieldOutput)
             || self.state == state_to_index(State::InQuotedFieldDiscard)

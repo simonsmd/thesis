@@ -46,6 +46,7 @@ impl Dfa for BitshiftDfa {
         dfa
     }
 
+    #[inline]
     fn run(&mut self, buffer: &mut [u8], cursor: &mut Cursor, field_ends: &mut [usize]) -> DfaResult {
         let mut state = self.state;
         let mut unmasked_state = self.state;
@@ -100,6 +101,7 @@ impl Dfa for BitshiftDfa {
         result
     }
 
+    #[inline]
     fn finish(&self, config: &Config) -> DfaResult {
         let unterminated_quote = self.state == State::InQuotedFieldOutput as u64
             || self.state == State::InQuotedFieldDiscard as u64

@@ -136,6 +136,7 @@ impl Dfa for ReferenceDfa {
         }
     }
 
+    #[inline]
     fn run(&mut self, buffer: &mut [u8], cursor: &mut Cursor, field_ends: &mut [usize]) -> DfaResult {
         let mut state = self.state;
         let mut read = cursor.read;
@@ -181,6 +182,7 @@ impl Dfa for ReferenceDfa {
         result
     }
 
+    #[inline]
     fn finish(&self, config: &Config) -> DfaResult {
         let unterminated_quote = matches!(
             self.state,
