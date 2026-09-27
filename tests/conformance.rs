@@ -84,6 +84,23 @@ fn a_record_longer_than_the_buffer_grows_it() {
     assert_eq!(parsed, rows(&[&[&field, &field], &["small", "record"]]));
 }
 
+#[test]
+fn records_with_many_fields() {
+    // Crosses the parser's field slot growth, which starts at 1024, both
+    // mid-record and on the final field at end of input.
+    for count in [1, 1023, 1024, 1025, 2047, 2048, 2049, 5000] {
+        let fields: Vec<String> = (0..count).map(|i| i.to_string()).collect();
+        let record: Vec<&str> = fields.iter().map(String::as_str).collect();
+        let line = fields.join(",");
+        let expected = rows(&[&record, &["x"]]);
+
+        let parsed = parse(&Config::new(), format!("{line}\nx\n").as_bytes());
+        assert_eq!(parsed, expected, "{count} fields");
+        let parsed = parse(&Config::new(), format!("x\n{line}").as_bytes());
+        assert_eq!(parsed, rows(&[&["x"], &record]), "{count} fields at eof");
+    }
+}
+
 // ---- terminators ------------------------------------------------------
 
 #[test]

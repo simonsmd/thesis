@@ -1,5 +1,5 @@
 use crate::{
-    config::{Config, QuoteStyle}, parser::{Dfa, DfaResult}, reference::{State, STATE_MASK, is_field_emit, is_output, transition_next_state},
+    config::{Config, QuoteStyle}, parser::{Cursor, Dfa, DfaResult}, reference::{State, STATE_MASK, is_field_emit, is_output, transition_next_state},
 };
 
 pub struct BitshiftDfa {
@@ -46,18 +46,13 @@ impl Dfa for BitshiftDfa {
         dfa
     }
 
-    fn run(
-        &mut self,
-        buffer: &mut [u8],
-        read_index: &mut usize,
-        write_index: &mut usize,
-        record_start: &mut usize,
-        field_ends: &mut Vec<usize>,
-    ) -> DfaResult {
+    fn run(&mut self, buffer: &mut [u8], cursor: &mut Cursor, field_ends: &mut [usize]) -> DfaResult {
         let mut state = self.state;
         let mut unmasked_state = self.state;
-        let mut read = *read_index;
-        let mut write = *write_index;
+        let mut read = cursor.read;
+        let mut write = cursor.write;
+        let mut count = cursor.field_count;
+        let record_start = cursor.record_start;
 
         let result = loop {
             if read >= buffer.len() {
@@ -85,18 +80,23 @@ impl Dfa for BitshiftDfa {
                     break DfaResult::Error;
                 }
 
-                // TODO: also keep record start locally so its not loaded on every field emit
-                field_ends.push(write - *record_start);
+                field_ends[count] = write - record_start;
+                count += 1;
 
                 if state == State::EndRecord as u64 {
                     break DfaResult::EndRecord;
+                }
+
+                if count == field_ends.len() {
+                    break DfaResult::FieldEndsFull;
                 }
             }
         };
 
         self.state = state;
-        *read_index = read;
-        *write_index = write;
+        cursor.read = read;
+        cursor.write = write;
+        cursor.field_count = count;
         result
     }
 

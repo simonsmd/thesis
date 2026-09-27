@@ -1,5 +1,5 @@
 use crate::{
-    config::{Config, QuoteStyle}, parser::{Dfa, DfaResult},
+    config::{Config, QuoteStyle}, parser::{Cursor, Dfa, DfaResult},
 };
 
 // TODO: should be copy?
@@ -136,17 +136,12 @@ impl Dfa for ReferenceDfa {
         }
     }
 
-    fn run(
-        &mut self,
-        buffer: &mut [u8],
-        read_index: &mut usize,
-        write_index: &mut usize,
-        record_start: &mut usize,
-        field_ends: &mut Vec<usize>,
-    ) -> DfaResult {
+    fn run(&mut self, buffer: &mut [u8], cursor: &mut Cursor, field_ends: &mut [usize]) -> DfaResult {
         let mut state = self.state;
-        let mut read = *read_index;
-        let mut write = *write_index;
+        let mut read = cursor.read;
+        let mut write = cursor.write;
+        let mut count = cursor.field_count;
+        let record_start = cursor.record_start;
 
         let result = loop {
             if read >= buffer.len() {
@@ -166,17 +161,23 @@ impl Dfa for ReferenceDfa {
             read += (action != TransitionAction::Epsilon) as usize;
 
             if state == State::EndField || state == State::EndRecord {
-                field_ends.push(write - *record_start);
-            }
+                field_ends[count] = write - record_start;
+                count += 1;
 
-            if state == State::EndRecord {
-                break DfaResult::EndRecord;
+                if state == State::EndRecord {
+                    break DfaResult::EndRecord;
+                }
+
+                if count == field_ends.len() {
+                    break DfaResult::FieldEndsFull;
+                }
             }
         };
 
         self.state = state;
-        *read_index = read;
-        *write_index = write;
+        cursor.read = read;
+        cursor.write = write;
+        cursor.field_count = count;
         result
     }
 

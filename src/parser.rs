@@ -11,12 +11,34 @@ pub struct Parser<R: Read, D: Dfa> {
     dfa: D,
     reader: R,
     buffer: Buffer,
-    record_start: usize,
-    read_index: usize,
-    write_index: usize,
+    cursor: Cursor,
     field_ends: Vec<usize>,
     position: Position,
 }
+
+/// The parser's positions in the buffer, bundled so a [`Dfa`] takes them
+/// through one pointer instead of one argument each.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Cursor {
+    /// Next input byte to consume.
+    pub read: usize,
+    /// Where the next output byte is compacted to. Always `<= read`.
+    pub write: usize,
+    /// Start of the current record's output bytes.
+    pub record_start: usize,
+    /// Number of field ends recorded for the current record.
+    pub field_count: usize,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Position {
+    pub byte: usize,
+    pub record: usize,
+    pub field: usize,
+}
+
+/// Initial size for the field_ends buffer
+const INITIAL_FIELDS: usize = 1024;
 
 impl<R: Read, D: Dfa> Parser<R, D> {
     pub fn new(reader: R) -> Self {
@@ -36,10 +58,8 @@ impl<R: Read, D: Dfa> Parser<R, D> {
             dfa,
             reader,
             buffer: Buffer::with_capacity(capacity),
-            record_start: 0,
-            read_index: 0,
-            write_index: 0,
-            field_ends: Vec::new(),
+            cursor: Cursor::default(),
+            field_ends: vec![0; INITIAL_FIELDS],
             position: Position::default(),
         }
     }
@@ -55,13 +75,6 @@ impl<R: Read, D: Dfa> Parser<R, D> {
     pub fn config(&self) -> &Config {
         &self.config
     }
-}
-
-#[derive(Debug, Default, Clone, Copy)]
-pub struct Position {
-    pub byte: usize,
-    pub record: usize,
-    pub field: usize,
 }
 
 impl Display for Position {
@@ -104,17 +117,19 @@ pub trait Dfa {
     /// Used to initialize state like transition tables.
     fn new(config: &Config) -> Self;
 
-    /// Process the buffer of csv data and return when a record ends or the buffer is exhausted
+    /// Process the buffer of csv data and return when a record ends, the buffer is exhausted or
+    /// `field_ends` is full.
     ///
-    /// The fields of a record are compacted continously starting at record_start and the field
-    /// boundries are recorded in the field_ends array (relative to record_start).
+    /// The fields of a record are compacted continously starting at `cursor.record_start` and the
+    /// field boundries are written to field_ends (relative to
+    /// `record_start`) with the number of fields recorded in `cursor.field_count`. The caller must
+    /// guarantee `cursor.field_count < field_ends.len()` on entry. When the field_ends buffer
+    /// overflows ([`DfaResult::FieldEndsFull`]) the caller must grow the buffer.
     fn run(
         &mut self,
         buffer: &mut [u8],
-        read_index: &mut usize,
-        write_index: &mut usize,
-        record_start: &mut usize,
-        field_ends: &mut Vec<usize>,
+        cursor: &mut Cursor,
+        field_ends: &mut [usize],
     ) -> DfaResult;
 
     /// Decide whether the input may end where it currently does.
@@ -130,46 +145,56 @@ pub trait Dfa {
 pub enum DfaResult {
     EndRecord,
     Refill,
+    FieldEndsFull,
     Error,
 }
 
 impl<R: Read, D: Dfa> Parser<R, D> {
     pub fn read_record(&mut self) -> Result<Option<Record<'_>>, Error> {
-        self.record_start = self.write_index;
-        self.field_ends.clear();
+        let cursor = &mut self.cursor;
+        cursor.record_start = cursor.write;
+        cursor.field_count = 0;
 
         let result = loop {
-            if self.read_index == self.buffer.len() {
+            if cursor.read == self.buffer.len() {
                 let Refill { shift, read } = self
                     .buffer
-                    .fill(&mut self.reader, self.record_start, self.write_index)
+                    .fill(&mut self.reader, cursor.record_start, cursor.write)
                     .map_err(Error::IO)?;
-                self.record_start -= shift;
-                self.write_index -= shift;
-                self.read_index = self.write_index;
+                cursor.record_start -= shift;
+                cursor.write -= shift;
+                cursor.read = cursor.write;
 
                 if read == 0 {
                     if self.dfa.finish(&self.config) == DfaResult::Error {
                         break DfaResult::Error;
                     }
 
-                    if self.write_index == self.record_start && self.field_ends.is_empty() {
+                    if cursor.write == cursor.record_start && cursor.field_count == 0 {
                         return Ok(None);
                     }
 
-                    self.field_ends.push(self.write_index - self.record_start);
+                    self.field_ends[cursor.field_count] = cursor.write - cursor.record_start;
+                    cursor.field_count += 1;
                     break DfaResult::EndRecord;
                 }
             }
 
-            match self.dfa.run(self.buffer.data_mut(), &mut self.read_index, &mut self.write_index, &mut self.record_start, &mut self.field_ends) {
+            match self
+                .dfa
+                .run(self.buffer.data_mut(), cursor, &mut self.field_ends)
+            {
                 DfaResult::Refill => continue,
+                DfaResult::FieldEndsFull => {
+                    let len = self.field_ends.len() * 2;
+                    self.field_ends.resize(len, 0);
+                }
                 result => break result,
             }
         };
 
-        self.position.field = self.field_ends.len();
-        self.position.byte = self.buffer.source_offset(self.read_index);
+        self.position.field = cursor.field_count;
+        self.position.byte = self.buffer.source_offset(cursor.read);
 
         if result == DfaResult::Error {
             return Err(Error::Parser(self.position));
@@ -178,8 +203,8 @@ impl<R: Read, D: Dfa> Parser<R, D> {
         self.position.record += 1;
 
         Ok(Some(Record {
-            buffer: &self.buffer.data()[self.record_start..self.write_index],
-            field_ends: &self.field_ends,
+            buffer: &self.buffer.data()[cursor.record_start..cursor.write],
+            field_ends: &self.field_ends[..cursor.field_count],
         }))
     }
 }
