@@ -1,5 +1,5 @@
 use crate::{
-    config::{Config, QuoteStyle}, parser::{Cursor, Dfa, DfaResult},
+    config::{Config, QuoteStyle}, parser::Dfa,
 };
 
 // TODO: should be copy?
@@ -29,7 +29,7 @@ pub fn is_field_emit(state: u64) -> bool {
     state >= State::EndField as u64
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransitionAction {
     Discard,
     Output,
@@ -124,77 +124,55 @@ pub fn transition_next_state(config: &Config, state: State, byte: u8) -> (State,
 }
 
 pub struct ReferenceDfa {
-    state: State,
     config: Config,
 }
 
 impl Dfa for ReferenceDfa {
+    type State = (State, TransitionAction);
+
     fn new(config: &Config) -> Self {
         Self {
-            state: State::StartRecord,
             config: config.clone(),
         }
     }
 
-    #[inline]
-    fn run(&mut self, buffer: &mut [u8], cursor: &mut Cursor, field_ends: &mut [usize]) -> DfaResult {
-        let mut state = self.state;
-        let mut read = cursor.read;
-        let mut write = cursor.write;
-        let mut count = cursor.field_count;
-        let record_start = cursor.record_start;
-
-        let result = loop {
-            if read >= buffer.len() {
-                break DfaResult::Refill;
-            }
-
-            let (next, action) = transition(&self.config, state, buffer[read]);
-            state = next;
-
-            if state == State::Error {
-                break DfaResult::Error;
-            }
-
-            // TODO: is this or branch faster?
-            buffer[write] = buffer[read];
-            write += (action == TransitionAction::Output) as usize;
-            read += (action != TransitionAction::Epsilon) as usize;
-
-            if state == State::EndField || state == State::EndRecord {
-                field_ends[count] = write - record_start;
-                count += 1;
-
-                if state == State::EndRecord {
-                    break DfaResult::EndRecord;
-                }
-
-                if count == field_ends.len() {
-                    break DfaResult::FieldEndsFull;
-                }
-            }
-        };
-
-        self.state = state;
-        cursor.read = read;
-        cursor.write = write;
-        cursor.field_count = count;
-        result
+    #[inline(always)]
+    fn start_state(&self) -> Self::State {
+        (State::StartRecord, TransitionAction::Discard)
     }
 
-    #[inline]
-    fn finish(&self, config: &Config) -> DfaResult {
-        let unterminated_quote = matches!(
-            self.state,
-            State::InQuotedFieldOutput
-                | State::InQuotedFieldDiscard
-                | State::EscapeSequenceInQuotedField
-        );
+    #[inline(always)]
+    fn transition(&self, (state, _): Self::State, byte: u8) -> Self::State {
+        transition_next_state(&self.config, state, byte)
+    }
 
-        if unterminated_quote && matches!(config.quote_style, QuoteStyle::Strict(_)) {
-            DfaResult::Error
-        } else {
-            DfaResult::EndRecord
-        }
+    #[inline(always)]
+    fn is_output(&self, (_, action): Self::State) -> bool {
+        action == TransitionAction::Output
+    }
+
+    #[inline(always)]
+    fn is_field_end(&self, (state, _): Self::State) -> bool {
+        matches!(state, State::EndField | State::EndRecord | State::Error)
+    }
+
+    #[inline(always)]
+    fn is_record_end(&self, (state, _): Self::State) -> bool {
+        state == State::EndRecord
+    }
+
+    #[inline(always)]
+    fn is_error(&self, (state, _): Self::State) -> bool {
+        state == State::Error
+    }
+
+    #[inline(always)]
+    fn in_quoted_field(&self, (state, _): Self::State) -> bool {
+        matches!(state, State::InQuotedFieldOutput | State::InQuotedFieldDiscard)
+    }
+
+    #[inline(always)]
+    fn in_escape_sequence(&self, (state, _): Self::State) -> bool {
+        matches!(state, State::EscapeSequenceInField | State::EscapeSequenceInQuotedField)
     }
 }

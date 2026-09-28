@@ -1,32 +1,21 @@
-use crate::{config::{Config, QuoteStyle}, parser::{Cursor, Dfa, DfaResult}, reference::{State, TransitionAction, transition_next_state}};
+use crate::{config::Config, parser::Dfa, reference::{State, TransitionAction, transition_next_state}};
 
 pub struct TableDfa {
-    table: [[Transition; 11]; 256],
-    state: u8,
+    /// Next state index for every input byte and current state.
+    ///
+    /// The entries hold nothing but the index, so a loaded entry is the index of the next lookup
+    /// as is and the loop-carried chain is a single load. Whether a transition outputs its byte
+    /// follows from the state it enters (see [`is_output`]).
+    table: [[u8; 11]; 256],
 }
 
-#[derive(Clone, Copy, Default)]
-struct Transition(u8);
-
-impl Transition {
-    fn new(state: State, action: TransitionAction) -> Self {
-        Self(state_to_index(state) | ((action == TransitionAction::Output) as u8) << 7)
-    }
-
-    fn state_index(&self) -> u8 {
-        self.0 & 0x7f
-    }
-
-    fn has_output(&self) -> bool {
-        self.0 & (1 << 7) != 0
-    }
-}
-
+/// The output states come first so [`is_output`] is a single compare, and the states that end a
+/// field come last so [`is_field_emit`] is one too.
 fn state_to_index(state: State) -> u8 {
     match state {
-        State::StartRecord => 0,
-        State::InField => 1,
-        State::InQuotedFieldOutput => 2,
+        State::InField => 0,
+        State::InQuotedFieldOutput => 1,
+        State::StartRecord => 2,
         State::InQuotedFieldDiscard => 3,
         State::EscapeSequenceInField => 4,
         State::EscapeSequenceInQuotedField => 5,
@@ -38,8 +27,12 @@ fn state_to_index(state: State) -> u8 {
     }
 }
 
-pub fn is_field_emit(state: u8) -> bool {
-    state >= state_to_index(State::EndField)
+pub fn is_output(state: usize) -> bool {
+    state <= state_to_index(State::InQuotedFieldOutput) as usize
+}
+
+pub fn is_field_emit(state: usize) -> bool {
+    state >= state_to_index(State::EndField) as usize
 }
 
 
@@ -63,17 +56,24 @@ impl TableDfa {
         for b in 0..=255_u8 {
             for state in STATES {
                 let (next_state, action) = transition_next_state(config, state, b);
-                self.table[b as usize][state_to_index(state) as usize] = Transition::new(next_state, action);
+                let next = state_to_index(next_state);
+                debug_assert_eq!(
+                    action == TransitionAction::Output,
+                    is_output(next as usize),
+                    "output must follow from the entered state: {state:?} --{b:#04x}--> {next_state:?}",
+                );
+                self.table[b as usize][state_to_index(state) as usize] = next;
             }
         }
     }
 }
 
 impl Dfa for TableDfa {
+    type State = usize;
+
     fn new(config: &Config) -> Self {
         let mut dfa = Self {
-            table: [[Transition::default(); 11]; 256],
-            state: state_to_index(State::StartRecord)
+            table: [[0; 11]; 256],
         };
 
         dfa.build_transition_table(config);
@@ -81,66 +81,43 @@ impl Dfa for TableDfa {
         dfa
     }
 
-    #[inline]
-    fn run(&mut self, buffer: &mut [u8], cursor: &mut Cursor, field_ends: &mut [usize]) -> DfaResult {
-        let mut state = self.state;
-        let mut read = cursor.read;
-        let mut write = cursor.write;
-        let mut count = cursor.field_count;
-        let record_start = cursor.record_start;
-
-        let result = loop {
-            if read >= buffer.len() {
-                break DfaResult::Refill;
-            }
-
-            let byte = buffer[read];
-            let transition = self.table[byte as usize][state as usize];
-            state = transition.state_index();
-
-            buffer[write] = byte;
-            write += transition.has_output() as usize;
-            read += 1;
-
-            if is_field_emit(state) {
-                // TODO: also error when calling read_record/run again when already in the error
-                // state.
-                if state == state_to_index(State::Error) {
-                    // report the byte where the error occured which was not consumed
-                    read -= 1;
-                    break DfaResult::Error;
-                }
-
-                field_ends[count] = write - record_start;
-                count += 1;
-
-                if state == state_to_index(State::EndRecord) {
-                    break DfaResult::EndRecord;
-                }
-
-                if count == field_ends.len() {
-                    break DfaResult::FieldEndsFull;
-                }
-            }
-        };
-
-        self.state = state;
-        cursor.read = read;
-        cursor.write = write;
-        cursor.field_count = count;
-        result
+    #[inline(always)]
+    fn start_state(&self) -> Self::State {
+        state_to_index(State::StartRecord) as usize
     }
 
-    #[inline]
-    fn finish(&self, config: &Config) -> DfaResult {
-        let unterminated_quote = self.state == state_to_index(State::InQuotedFieldOutput)
-            || self.state == state_to_index(State::InQuotedFieldDiscard)
-            || self.state == state_to_index(State::EscapeSequenceInQuotedField);
+    #[inline(always)]
+    fn transition(&self, state: Self::State, byte: u8) -> Self::State {
+        self.table[byte as usize][state] as usize
+    }
 
-        if unterminated_quote && matches!(config.quote_style, QuoteStyle::Strict(_)) {
-            DfaResult::Error
-        } else {
-            DfaResult::EndRecord
-        }
+    #[inline(always)]
+    fn is_output(&self, state: Self::State) -> bool {
+        is_output(state)
+    }
+
+    #[inline(always)]
+    fn is_field_end(&self, state: Self::State) -> bool {
+        is_field_emit(state)
+    }
+
+    #[inline(always)]
+    fn is_record_end(&self, state: Self::State) -> bool {
+        state == state_to_index(State::EndRecord) as usize
+    }
+
+    #[inline(always)]
+    fn is_error(&self, state: Self::State) -> bool {
+        state == state_to_index(State::Error) as usize
+    }
+
+    #[inline(always)]
+    fn in_quoted_field(&self, state: Self::State) -> bool {
+        state == state_to_index(State::InQuotedFieldOutput) as usize || state == state_to_index(State::InQuotedFieldDiscard) as usize
+    }
+
+    #[inline(always)]
+    fn in_escape_sequence(&self, state: Self::State) -> bool {
+        state == state_to_index(State::EscapeSequenceInField) as usize || state == state_to_index(State::EscapeSequenceInQuotedField) as usize
     }
 }

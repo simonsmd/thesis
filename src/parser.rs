@@ -2,7 +2,7 @@ use std::{fmt::Display, io::Read, str::Utf8Error};
 
 use crate::{
     buffer::{Buffer, DEFAULT_CAPACITY, Refill},
-    config::Config,
+    config::{Config, QuoteStyle},
 };
 
 #[derive(Debug)]
@@ -11,23 +11,15 @@ pub struct Parser<R: Read, D: Dfa> {
     dfa: D,
     reader: R,
     buffer: Buffer,
-    cursor: Cursor,
+    read_index: usize,
+    write_index: usize,
+    record_start: usize,
     field_ends: Vec<usize>,
+    field_count: usize,
     position: Position,
-}
-
-/// The parser's positions in the buffer, bundled so a [`Dfa`] takes them
-/// through one pointer instead of one argument each.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct Cursor {
-    /// Next input byte to consume.
-    pub read: usize,
-    /// Where the next output byte is compacted to. Always `<= read`.
-    pub write: usize,
-    /// Start of the current record's output bytes.
-    pub record_start: usize,
-    /// Number of field ends recorded for the current record.
-    pub field_count: usize,
+    /// store if this parser encountered an error so read_record does not start parsing from an
+    /// invalid state
+    error: bool,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -58,9 +50,13 @@ impl<R: Read, D: Dfa> Parser<R, D> {
             dfa,
             reader,
             buffer: Buffer::with_capacity(capacity),
-            cursor: Cursor::default(),
+            read_index: 0,
+            write_index: 0,
+            record_start: 0,
             field_ends: vec![0; INITIAL_FIELDS],
             position: Position::default(),
+            field_count: 0,
+            error: false,
         }
     }
 
@@ -112,37 +108,45 @@ impl std::error::Error for Error {
 }
 
 pub trait Dfa {
+    /// Type for the DFA state.
+    ///
+    /// Some implementations use tuples (e.g. masked and unmasked state for the bitshift implementation)
+    /// to optimize dependency chains in the core loops by splitting the registers used for
+    /// computing the next state and checking the output bit and special states.
+    ///
+    /// Its best to store the state in types the size of a register. Smaller types like u8
+    /// introduce a data dependency between records because the state initialization at the start
+    /// of `read_record` only overwrites the register paritally. This means multiple records cannot
+    /// be processed in parallel using out-of-order execution even if the record end branch is
+    /// predicted correctly.
+    type State: Copy;
+
     /// Create an instance of this Dfa with the provided configuration
     ///
     /// Used to initialize state like transition tables.
     fn new(config: &Config) -> Self;
 
-    /// Process the buffer of csv data and return when a record ends, the buffer is exhausted or
-    /// `field_ends` is full.
-    ///
-    /// The fields of a record are compacted continously starting at `cursor.record_start` and the
-    /// field boundries are written to field_ends (relative to
-    /// `record_start`) with the number of fields recorded in `cursor.field_count`. The caller must
-    /// guarantee `cursor.field_count < field_ends.len()` on entry. When the field_ends buffer
-    /// overflows ([`DfaResult::FieldEndsFull`]) the caller must grow the buffer.
-    fn run(
-        &mut self,
-        buffer: &mut [u8],
-        cursor: &mut Cursor,
-        field_ends: &mut [usize],
-    ) -> DfaResult;
+    fn start_state(&self) -> Self::State;
 
-    /// Decide whether the input may end where it currently does.
+    fn transition(&self, state: Self::State, byte: u8) -> Self::State;
+
+    fn is_output(&self, state: Self::State) -> bool;
+
+    /// Check if the current state marks the end of a field
     ///
-    /// Called once the reader is exhausted. Returns [`DfaResult::Error`] if the
-    /// input stopped in a state that is not a valid place to end, such as an
-    /// unterminated quoted field in a strict dialect, and
-    /// [`DfaResult::EndRecord`] otherwise.
-    fn finish(&self, config: &Config) -> DfaResult;
+    /// A record end or error is also the end of a field.
+    fn is_field_end(&self, state: Self::State) -> bool;
+
+    fn is_record_end(&self, state: Self::State) -> bool;
+
+    fn is_error(&self, state: Self::State) -> bool;
+
+    fn in_quoted_field(&self, state: Self::State) -> bool;
+
+    fn in_escape_sequence(&self, state: Self::State) -> bool;
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub enum DfaResult {
+enum Exit {
     EndRecord,
     Refill,
     FieldEndsFull,
@@ -150,61 +154,116 @@ pub enum DfaResult {
 }
 
 impl<R: Read, D: Dfa> Parser<R, D> {
+    #[inline]
     pub fn read_record(&mut self) -> Result<Option<Record<'_>>, Error> {
-        let cursor = &mut self.cursor;
-        cursor.record_start = cursor.write;
-        cursor.field_count = 0;
+        if self.error {
+            return Err(Error::Parser(self.position));
+        }
 
-        let result = loop {
-            if cursor.read == self.buffer.len() {
+        self.record_start = self.write_index;
+        self.field_count = 0;
+
+        // A record always starts in the StartRecord (equivalent to EndRecord) state so there is no
+        // need to store the DFA state between records
+        let mut state = self.dfa.start_state();
+
+        let is_error = loop {
+            if self.read_index == self.buffer.len() {
                 let Refill { shift, read } = self
                     .buffer
-                    .fill(&mut self.reader, cursor.record_start, cursor.write)
+                    .fill(&mut self.reader, self.record_start, self.write_index)
                     .map_err(Error::IO)?;
-                cursor.record_start -= shift;
-                cursor.write -= shift;
-                cursor.read = cursor.write;
+                self.record_start -= shift;
+                self.write_index -= shift;
+                self.read_index = self.write_index;
 
                 if read == 0 {
-                    if self.dfa.finish(&self.config) == DfaResult::Error {
-                        break DfaResult::Error;
+                    if (self.dfa.in_quoted_field(state)
+                        && matches!(self.config.quote_style, QuoteStyle::Strict(_)))
+                        || self.dfa.in_escape_sequence(state)
+                    {
+                        break true;
                     }
 
-                    if cursor.write == cursor.record_start && cursor.field_count == 0 {
+                    if self.write_index == self.record_start && self.field_count == 0 {
                         return Ok(None);
                     }
 
-                    self.field_ends[cursor.field_count] = cursor.write - cursor.record_start;
-                    cursor.field_count += 1;
-                    break DfaResult::EndRecord;
+                    self.field_ends[self.field_count] = self.write_index - self.record_start;
+                    self.field_count += 1;
+                    break false;
                 }
             }
 
-            match self
-                .dfa
-                .run(self.buffer.data_mut(), cursor, &mut self.field_ends)
-            {
-                DfaResult::Refill => continue,
-                DfaResult::FieldEndsFull => {
+            // keep variables used in the hotloop in registers
+            let dfa = &self.dfa;
+            let buffer = self.buffer.data_mut();
+            let field_ends = self.field_ends.as_mut_slice();
+            let mut read = self.read_index;
+            let mut write = self.write_index;
+            let mut count = self.field_count;
+            let record_start = self.record_start;
+
+            let exit = loop {
+                if read >= buffer.len() {
+                    break Exit::Refill;
+                }
+
+                let byte = buffer[read];
+                state = dfa.transition(state, byte);
+
+                buffer[write] = byte;
+                write += dfa.is_output(state) as usize;
+                read += 1;
+
+                if dfa.is_field_end(state) {
+                    if dfa.is_error(state) {
+                        // report the byte where the error occured which was not consumed
+                        read -= 1;
+                        break Exit::Error;
+                    }
+
+                    field_ends[count] = write - record_start;
+                    count += 1;
+
+                    if dfa.is_record_end(state) {
+                        break Exit::EndRecord;
+                    }
+
+                    if count == field_ends.len() {
+                        break Exit::FieldEndsFull;
+                    }
+                }
+            };
+
+            self.read_index = read;
+            self.write_index = write;
+            self.field_count = count;
+
+            match exit {
+                Exit::Refill => {}
+                Exit::FieldEndsFull => {
                     let len = self.field_ends.len() * 2;
                     self.field_ends.resize(len, 0);
                 }
-                result => break result,
+                Exit::EndRecord => break false,
+                Exit::Error => break true,
             }
         };
 
-        self.position.field = cursor.field_count;
-        self.position.byte = self.buffer.source_offset(cursor.read);
+        self.position.field = self.field_count;
+        self.position.byte = self.buffer.source_offset(self.read_index);
 
-        if result == DfaResult::Error {
+        if is_error {
+            self.error = true;
             return Err(Error::Parser(self.position));
         }
 
         self.position.record += 1;
 
         Ok(Some(Record {
-            buffer: &self.buffer.data()[cursor.record_start..cursor.write],
-            field_ends: &self.field_ends[..cursor.field_count],
+            buffer: &self.buffer.data()[self.record_start..self.write_index],
+            field_ends: &self.field_ends[..self.field_count],
         }))
     }
 }

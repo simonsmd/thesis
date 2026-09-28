@@ -1,4 +1,4 @@
-use crate::{config::{Config, QuoteStyle, RecordTerminator}, parser::{Cursor, Dfa, DfaResult}, reference::{State, transition_next_state}};
+use crate::{config::{Config, RecordTerminator}, parser::Dfa, reference::{State, transition_next_state}};
 
 const NUM_EQUIVALENCE_CLASSES: usize =  7;
 
@@ -6,7 +6,6 @@ pub struct ClassDfa {
     transition_table: [[u8; 11]; NUM_EQUIVALENCE_CLASSES],
     class_table: [u8; 256],
     class_index: u8,
-    state: u8,
 }
 
 fn state_to_index(state: State) -> u8 {
@@ -25,12 +24,12 @@ fn state_to_index(state: State) -> u8 {
     }
 }
 
-pub fn is_output(state: u8) -> bool {
-    state <= state_to_index(State::InQuotedFieldOutput)
+pub fn is_output(state: usize) -> bool {
+    state <= state_to_index(State::InQuotedFieldOutput) as usize
 }
 
-pub fn is_field_emit(state: u8) -> bool {
-    state >= state_to_index(State::EndField)
+pub fn is_field_emit(state: usize) -> bool {
+    state >= state_to_index(State::EndField) as usize
 }
 
 
@@ -105,12 +104,13 @@ impl ClassDfa {
 }
 
 impl Dfa for ClassDfa {
+    type State = usize;
+
     fn new(config: &Config) -> Self {
         let mut dfa = Self {
             transition_table: [[0; 11]; NUM_EQUIVALENCE_CLASSES],
             class_table: [0; 256],
             class_index: 0,
-            state: state_to_index(State::StartRecord)
         };
 
         dfa.build_equivalence_class_table(config);
@@ -119,67 +119,45 @@ impl Dfa for ClassDfa {
         dfa
     }
 
-    #[inline]
-    fn run(&mut self, buffer: &mut [u8], cursor: &mut Cursor, field_ends: &mut [usize]) -> DfaResult {
-        let mut state = self.state;
-        let mut read = cursor.read;
-        let mut write = cursor.write;
-        let mut count = cursor.field_count;
-        let record_start = cursor.record_start;
-
-        let result = loop {
-            if read >= buffer.len() {
-                break DfaResult::Refill;
-            }
-
-            let byte = buffer[read];
-            let class = self.class_table[byte as usize];
-            state = self.transition_table[class as usize][state as usize];
-
-            buffer[write] = byte;
-            write += is_output(state) as usize;
-            read += 1;
-
-            if is_field_emit(state) {
-                // TODO: also error when calling read_record/run again when already in the error
-                // state.
-                if state == state_to_index(State::Error) {
-                    // report the byte where the error occured which was not consumed
-                    read -= 1;
-                    break DfaResult::Error;
-                }
-
-                field_ends[count] = write - record_start;
-                count += 1;
-
-                if state == state_to_index(State::EndRecord) {
-                    break DfaResult::EndRecord;
-                }
-
-                if count == field_ends.len() {
-                    break DfaResult::FieldEndsFull;
-                }
-            }
-        };
-
-        self.state = state;
-        cursor.read = read;
-        cursor.write = write;
-        cursor.field_count = count;
-        result
+    #[inline(always)]
+    fn start_state(&self) -> Self::State {
+        state_to_index(State::StartRecord) as usize
     }
 
-    #[inline]
-    fn finish(&self, config: &Config) -> DfaResult {
-        let unterminated_quote = self.state == state_to_index(State::InQuotedFieldOutput)
-            || self.state == state_to_index(State::InQuotedFieldDiscard)
-            || self.state == state_to_index(State::EscapeSequenceInQuotedField);
+    #[inline(always)]
+    fn transition(&self, state: Self::State, byte: u8) -> Self::State {
+        let class = self.class_table[byte as usize];
+        self.transition_table[class as usize][state] as usize
+    }
 
-        if unterminated_quote && matches!(config.quote_style, QuoteStyle::Strict(_)) {
-            DfaResult::Error
-        } else {
-            DfaResult::EndRecord
-        }
+    #[inline(always)]
+    fn is_output(&self, state: Self::State) -> bool {
+        is_output(state)
+    }
+
+    #[inline(always)]
+    fn is_field_end(&self, state: Self::State) -> bool {
+        is_field_emit(state)
+    }
+
+    #[inline(always)]
+    fn is_record_end(&self, state: Self::State) -> bool {
+        state == state_to_index(State::EndRecord) as usize
+    }
+
+    #[inline(always)]
+    fn is_error(&self, state: Self::State) -> bool {
+        state == state_to_index(State::Error) as usize
+    }
+
+    #[inline(always)]
+    fn in_quoted_field(&self, state: Self::State) -> bool {
+        state == state_to_index(State::InQuotedFieldOutput) as usize || state == state_to_index(State::InQuotedFieldDiscard) as usize
+    }
+
+    #[inline(always)]
+    fn in_escape_sequence(&self, state: Self::State) -> bool {
+        state == state_to_index(State::EscapeSequenceInField) as usize || state == state_to_index(State::EscapeSequenceInQuotedField) as usize
     }
 }
 

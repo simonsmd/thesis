@@ -8,7 +8,7 @@ use csv_parser::{
     config::{Config, QuoteStyle, RecordTerminator},
     parser::Error,
 };
-use harness::{parse, parse_with_capacity, rows, try_parse};
+use harness::{parse, parse_with_capacity, read_after_error, rows, try_parse};
 
 // ---- basics -----------------------------------------------------------
 
@@ -216,12 +216,32 @@ fn strict_mode_rejects_unclosed_quote_at_eof() {
 }
 
 #[test]
-fn strict_mode_rejects_unclosed_escape_in_quoted_field_at_eof() {
-    // Input ending mid-escape is still inside the quoted field, so it is
-    // unterminated just like `"ab` above.
-    let config = Config::new().quote_style(QuoteStyle::Strict(false));
-    let err = try_parse(&config, b"\"ab\\").unwrap_err();
-    assert!(matches!(err, Error::Parser(_)));
+fn unclosed_escape_in_quoted_field_at_eof() {
+    // An escape at the end of the input has nothing left to escape, so it is an
+    // error whatever the quote style, unlike an unclosed quote on its own.
+    for style in [QuoteStyle::Toggle, QuoteStyle::Strict(false), QuoteStyle::Strict(true)] {
+        let config = Config::new().quote_style(style.clone());
+        let err = try_parse(&config, b"\"ab\\").unwrap_err();
+        assert!(matches!(err, Error::Parser(_)), "{style:?}");
+    }
+}
+
+#[test]
+fn unclosed_escape_in_unquoted_field_at_eof() {
+    // The same holds for an escape in a field that was never quoted.
+    for style in [QuoteStyle::Toggle, QuoteStyle::Strict(false), QuoteStyle::Strict(true)] {
+        let config = Config::new().quote_style(style.clone());
+        let err = try_parse(&config, b"a,b\\").unwrap_err();
+        assert!(matches!(err, Error::Parser(_)), "{style:?}");
+    }
+}
+
+#[test]
+fn trailing_backslash_without_unquoted_escapes_at_eof() {
+    // With escapes off in unquoted fields the backslash is an ordinary byte, so
+    // ending on it is fine.
+    let config = Config::new().escape_in_unquoted_fields(false);
+    assert_eq!(parse(&config, b"a,b\\"), rows(&[&["a", "b\\"]]));
 }
 
 #[test]
@@ -361,6 +381,16 @@ fn parser_error_byte_offset_across_records() {
         Error::Parser(pos) => assert_eq!(pos.byte, 9),
         other => panic!("expected parser error, got {other:?}"),
     }
+}
+
+#[test]
+fn parser_error_is_sticky() {
+    // The input after an error is not a record start, so reading on reports the
+    // same error again instead of resuming in the middle of the broken record.
+    let config = Config::new().quote_style(QuoteStyle::Strict(false));
+    let (first, second) = read_after_error(&config, b"a,b\nc\"d,e\nf,g\n");
+    assert!(first.starts_with("Err(Parser("), "{first}");
+    assert_eq!(first, second);
 }
 
 // ---- custom configuration --------------------------------------------
