@@ -127,7 +127,8 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
                 let byte = buffer[read];
                 state = dfa.transition(state, byte);
 
-                buffer[write] = byte;
+                // SAFETY: write <= read < buffer.len()
+                unsafe { *buffer.get_unchecked_mut(write) = byte; }
                 write += dfa.is_output(state) as usize;
                 read += 1;
 
