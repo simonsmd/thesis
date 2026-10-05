@@ -5,7 +5,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let file = File::open(std::env::args().nth(1).unwrap())?;
     let reader = BufReader::new(file);
 
-    let mut parser = csv_parser::parser::Parser::<_, ReferenceDfa>::new(reader);
+    let mut parser = csv_parser::parser::CompactionParser::<_, ReferenceDfa>::new(reader);
 
     while let Some(record) = parser.read_record()? {
         let fields: Vec<&str> = record.iter_str().collect::<Result<_, _>>()?;

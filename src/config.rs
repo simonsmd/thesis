@@ -1,4 +1,4 @@
-/// Dialect settings shared by every [`Dfa`](crate::parser::Dfa).
+/// Dialect settings shared by every [`Dfa`](crate::dfa::Dfa).
 ///
 /// Build one by chaining onto [`Config::new`]:
 ///

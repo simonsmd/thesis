@@ -1,21 +1,21 @@
 use crate::{
-    config::{Config, QuoteStyle}, parser::Dfa,
+    config::{Config, QuoteStyle}, dfa::Dfa,
 };
 
 // TODO: should be copy?
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum State {
-    StartRecord = 12,
-    InField = 0,
-    InQuotedFieldOutput = 6,
-    InQuotedFieldDiscard = 18,
-    EscapeSequenceInField = 24,
-    EscapeSequenceInQuotedField = 30,
-    AfterQuote = 36,
-    InComment = 42,
-    EndField = 48,
-    EndRecord = 54,
-    Error = 60,
+    StartRecord = 14,
+    InField = 1,
+    InQuotedFieldOutput = 7,
+    InQuotedFieldDiscard = 20,
+    EscapeSequenceInField = 26,
+    EscapeSequenceInQuotedField = 32,
+    AfterQuote = 38,
+    InComment = 44,
+    EndField = 50,
+    EndRecord = 56,
+    Error = 62,
 }
 
 /// 6 Bits per state so the masking for the bitshift dfa is done automatically by the shift instructions
@@ -149,6 +149,11 @@ impl Dfa for ReferenceDfa {
     #[inline(always)]
     fn is_output(&self, (_, action): Self::State) -> bool {
         action == TransitionAction::Output
+    }
+
+    #[inline(always)]
+    fn is_discard(&self, (_, action): Self::State) -> usize {
+        (action == TransitionAction::Discard) as usize
     }
 
     #[inline(always)]

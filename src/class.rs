@@ -1,4 +1,4 @@
-use crate::{config::{Config, RecordTerminator}, parser::Dfa, reference::{State, transition_next_state}};
+use crate::{config::{Config, RecordTerminator}, dfa::Dfa, reference::{State, transition_next_state}};
 
 const NUM_EQUIVALENCE_CLASSES: usize =  7;
 
@@ -133,6 +133,11 @@ impl Dfa for ClassDfa {
     #[inline(always)]
     fn is_output(&self, state: Self::State) -> bool {
         is_output(state)
+    }
+
+    #[inline(always)]
+    fn is_discard(&self, state: Self::State) -> usize {
+        !is_output(state) as usize
     }
 
     #[inline(always)]

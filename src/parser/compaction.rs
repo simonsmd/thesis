@@ -1,12 +1,14 @@
-use std::{fmt::Display, io::Read, str::Utf8Error};
+use std::{io::Read, str::Utf8Error};
 
+use super::{Error, Exit, INITIAL_FIELDS, Position};
 use crate::{
     buffer::{Buffer, DEFAULT_CAPACITY, Refill},
     config::{Config, QuoteStyle},
+    dfa::Dfa,
 };
 
 #[derive(Debug)]
-pub struct Parser<R: Read, D: Dfa> {
+pub struct CompactionParser<R: Read, D: Dfa> {
     config: Config,
     dfa: D,
     reader: R,
@@ -22,17 +24,7 @@ pub struct Parser<R: Read, D: Dfa> {
     error: bool,
 }
 
-#[derive(Debug, Default, Clone, Copy)]
-pub struct Position {
-    pub byte: usize,
-    pub record: usize,
-    pub field: usize,
-}
-
-/// Initial size for the field_ends buffer
-const INITIAL_FIELDS: usize = 1024;
-
-impl<R: Read, D: Dfa> Parser<R, D> {
+impl<R: Read, D: Dfa> CompactionParser<R, D> {
     pub fn new(reader: R) -> Self {
         Self::with_config(reader, Config::default())
     }
@@ -73,93 +65,15 @@ impl<R: Read, D: Dfa> Parser<R, D> {
     }
 }
 
-impl Display for Position {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "record {}, field {}, byte {}",
-            self.record, self.field, self.byte
-        )
-    }
-}
-
-#[derive(Debug)]
-pub enum Error {
-    Parser(Position),
-    IO(std::io::Error),
-}
-
-impl Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Error::Parser(position) => write!(f, "parser error at {position}"),
-            Error::IO(error) => write!(f, "IO error: {error}"),
-        }
-    }
-}
-
-impl std::error::Error for Error {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Error::Parser(_) => None,
-            Error::IO(error) => Some(error),
-        }
-    }
-}
-
-pub trait Dfa {
-    /// Type for the DFA state.
-    ///
-    /// Some implementations use tuples (e.g. masked and unmasked state for the bitshift implementation)
-    /// to optimize dependency chains in the core loops by splitting the registers used for
-    /// computing the next state and checking the output bit and special states.
-    ///
-    /// Its best to store the state in types the size of a register. Smaller types like u8
-    /// introduce a data dependency between records because the state initialization at the start
-    /// of `read_record` only overwrites the register paritally. This means multiple records cannot
-    /// be processed in parallel using out-of-order execution even if the record end branch is
-    /// predicted correctly.
-    type State: Copy;
-
-    /// Create an instance of this Dfa with the provided configuration
-    ///
-    /// Used to initialize state like transition tables.
-    fn new(config: &Config) -> Self;
-
-    fn start_state(&self) -> Self::State;
-
-    fn transition(&self, state: Self::State, byte: u8) -> Self::State;
-
-    fn is_output(&self, state: Self::State) -> bool;
-
-    /// Check if the current state marks the end of a field
-    ///
-    /// A record end or error is also the end of a field.
-    fn is_field_end(&self, state: Self::State) -> bool;
-
-    fn is_record_end(&self, state: Self::State) -> bool;
-
-    fn is_error(&self, state: Self::State) -> bool;
-
-    fn in_quoted_field(&self, state: Self::State) -> bool;
-
-    fn in_escape_sequence(&self, state: Self::State) -> bool;
-}
-
-enum Exit {
-    EndRecord,
-    Refill,
-    FieldEndsFull,
-    Error,
-}
-
-impl<R: Read, D: Dfa> Parser<R, D> {
+impl<R: Read, D: Dfa> CompactionParser<R, D> {
     #[inline]
     pub fn read_record(&mut self) -> Result<Option<Record<'_>>, Error> {
         if self.error {
             return Err(Error::Parser(self.position));
         }
 
+        // TODO: reset to current read index to clear more of the buffer on refill (and make
+        // write_index a local)
         self.record_start = self.write_index;
         self.field_count = 0;
 
@@ -196,6 +110,8 @@ impl<R: Read, D: Dfa> Parser<R, D> {
             }
 
             // keep variables used in the hotloop in registers
+            // TODO: make record_start and field_count locals since they do not need to persist
+            // between records
             let dfa = &self.dfa;
             let buffer = self.buffer.data_mut();
             let field_ends = self.field_ends.as_mut_slice();

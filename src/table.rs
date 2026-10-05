@@ -1,4 +1,4 @@
-use crate::{config::Config, parser::Dfa, reference::{State, TransitionAction, transition_next_state}};
+use crate::{config::Config, dfa::Dfa, reference::{State, TransitionAction, transition_next_state}};
 
 pub struct TableDfa {
     /// Next state index for every input byte and current state.
@@ -94,6 +94,11 @@ impl Dfa for TableDfa {
     #[inline(always)]
     fn is_output(&self, state: Self::State) -> bool {
         is_output(state)
+    }
+
+    #[inline(always)]
+    fn is_discard(&self, state: Self::State) -> usize {
+        !is_output(state) as usize
     }
 
     #[inline(always)]

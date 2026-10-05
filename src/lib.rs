@@ -1,4 +1,5 @@
 pub mod config;
+pub mod dfa;
 pub mod parser;
 mod buffer;
 pub mod reference;

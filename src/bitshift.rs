@@ -1,5 +1,5 @@
 use crate::{
-    config::Config, parser::Dfa, reference::{STATE_MASK, State, is_field_emit, is_output, transition_next_state},
+    config::Config, dfa::Dfa, reference::{STATE_MASK, State, is_field_emit, transition_next_state},
 };
 
 pub struct BitshiftDfa {
@@ -63,8 +63,13 @@ impl Dfa for BitshiftDfa {
     }
 
     #[inline(always)]
-    fn is_output(&self, (_, state): Self::State) -> bool {
-        is_output(state)
+    fn is_output(&self, (unmasked, _): Self::State) -> bool {
+        unmasked & 1 == 1
+    }
+
+    #[inline(always)]
+    fn is_discard(&self, (unmasked, _): Self::State) -> usize {
+        !unmasked as usize
     }
 
     #[inline(always)]
