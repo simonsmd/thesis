@@ -14,10 +14,7 @@ pub struct CompactionParser<R: Read, D: Dfa> {
     reader: R,
     buffer: Buffer,
     read_index: usize,
-    write_index: usize,
-    record_start: usize,
     field_ends: Vec<usize>,
-    field_count: usize,
     position: Position,
     /// store if this parser encountered an error so read_record does not start parsing from an
     /// invalid state
@@ -43,11 +40,8 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
             reader,
             buffer: Buffer::with_capacity(capacity),
             read_index: 0,
-            write_index: 0,
-            record_start: 0,
             field_ends: vec![0; INITIAL_FIELDS],
             position: Position::default(),
-            field_count: 0,
             error: false,
         }
     }
@@ -65,6 +59,11 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
     }
 }
 
+/// Minimum gap between write and read index at the start of a record and after a refill. 4 bytes
+/// were enough on Alder Lake but leave some extra space for other cpus (only costs a few extra
+/// refills)
+const MIN_GAP: usize = 64;
+
 impl<R: Read, D: Dfa> CompactionParser<R, D> {
     #[inline]
     pub fn read_record(&mut self) -> Result<Option<Record<'_>>, Error> {
@@ -72,10 +71,12 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
             return Err(Error::Parser(self.position));
         }
 
-        // TODO: reset to current read index to clear more of the buffer on refill (and make
-        // write_index a local)
-        self.record_start = self.write_index;
-        self.field_count = 0;
+        // Start the compacted record with a gap to the read index: if write trails read by only a
+        // few bytes the cpu falsely detects a conflict between the store (whose address is known
+        // late) and the loads of the next bytes, and flushes the pipeline or stops loading ahead
+        let mut record_start = self.read_index.saturating_sub(MIN_GAP);
+        let mut write = record_start;
+        let mut field_count = 0;
 
         // A record always starts in the StartRecord (equivalent to EndRecord) state so there is no
         // need to store the DFA state between records
@@ -83,13 +84,16 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
 
         let is_error = loop {
             if self.read_index == self.buffer.len() {
+                // read the new input MIN_GAP bytes after the write index, so the gap does not
+                // drop to zero for the rest of the record
+                let read_from = self.read_index.min(write + MIN_GAP);
                 let Refill { shift, read } = self
                     .buffer
-                    .fill(&mut self.reader, self.record_start, self.write_index)
+                    .fill(&mut self.reader, record_start, read_from)
                     .map_err(Error::IO)?;
-                self.record_start -= shift;
-                self.write_index -= shift;
-                self.read_index = self.write_index;
+                record_start -= shift;
+                write -= shift;
+                self.read_index = read_from - shift;
 
                 if read == 0 {
                     if (self.dfa.in_quoted_field(state)
@@ -99,26 +103,21 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
                         break true;
                     }
 
-                    if self.write_index == self.record_start && self.field_count == 0 {
+                    if write == record_start && field_count == 0 {
                         return Ok(None);
                     }
 
-                    self.field_ends[self.field_count] = self.write_index - self.record_start;
-                    self.field_count += 1;
+                    self.field_ends[field_count] = write - record_start;
+                    field_count += 1;
                     break false;
                 }
             }
 
             // keep variables used in the hotloop in registers
-            // TODO: make record_start and field_count locals since they do not need to persist
-            // between records
             let dfa = &self.dfa;
             let buffer = self.buffer.data_mut();
             let field_ends = self.field_ends.as_mut_slice();
             let mut read = self.read_index;
-            let mut write = self.write_index;
-            let mut count = self.field_count;
-            let record_start = self.record_start;
 
             let exit = loop {
                 if read >= buffer.len() {
@@ -139,22 +138,20 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
                         break Exit::Error;
                     }
 
-                    field_ends[count] = write - record_start;
-                    count += 1;
+                    field_ends[field_count] = write - record_start;
+                    field_count += 1;
 
                     if dfa.is_record_end(state) {
                         break Exit::EndRecord;
                     }
 
-                    if count == field_ends.len() {
+                    if field_count == field_ends.len() {
                         break Exit::FieldEndsFull;
                     }
                 }
             };
 
             self.read_index = read;
-            self.write_index = write;
-            self.field_count = count;
 
             match exit {
                 Exit::Refill => {}
@@ -167,19 +164,19 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
             }
         };
 
-        self.position.field = self.field_count;
         self.position.byte = self.buffer.source_offset(self.read_index);
 
         if is_error {
             self.error = true;
+            self.position.field = field_count;
             return Err(Error::Parser(self.position));
         }
 
         self.position.record += 1;
 
         Ok(Some(Record {
-            buffer: &self.buffer.data()[self.record_start..self.write_index],
-            field_ends: &self.field_ends[..self.field_count],
+            buffer: &self.buffer.data()[record_start..write],
+            field_ends: &self.field_ends[..field_count],
         }))
     }
 }

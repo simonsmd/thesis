@@ -195,11 +195,11 @@ impl<R: Read, D: Dfa> ZeroCopyParser<R, D> {
             }
         };
 
-        self.position.field = field_count;
         self.position.byte = self.buffer.source_offset(self.read_index);
 
         if is_error {
             self.error = true;
+            self.position.field = field_count;
             return Err(Error::Parser(self.position));
         }
 
