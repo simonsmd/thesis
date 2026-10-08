@@ -1,4 +1,4 @@
-//! Dialect conformance, run against every [`Dfa`](csv_parser::parser::Dfa).
+//! Dialect conformance, run against every [`Dfa`](csv_parser::dfa::Dfa).
 //!
 //! See `tests/harness/mod.rs` for how a case is dispatched to each DFA.
 
@@ -219,7 +219,11 @@ fn strict_mode_rejects_unclosed_quote_at_eof() {
 fn unclosed_escape_in_quoted_field_at_eof() {
     // An escape at the end of the input has nothing left to escape, so it is an
     // error whatever the quote style, unlike an unclosed quote on its own.
-    for style in [QuoteStyle::Toggle, QuoteStyle::Strict(false), QuoteStyle::Strict(true)] {
+    for style in [
+        QuoteStyle::Toggle,
+        QuoteStyle::Strict(false),
+        QuoteStyle::Strict(true),
+    ] {
         let config = Config::new().quote_style(style.clone());
         let err = try_parse(&config, b"\"ab\\").unwrap_err();
         assert!(matches!(err, Error::Parser(_)), "{style:?}");
@@ -229,7 +233,11 @@ fn unclosed_escape_in_quoted_field_at_eof() {
 #[test]
 fn unclosed_escape_in_unquoted_field_at_eof() {
     // The same holds for an escape in a field that was never quoted.
-    for style in [QuoteStyle::Toggle, QuoteStyle::Strict(false), QuoteStyle::Strict(true)] {
+    for style in [
+        QuoteStyle::Toggle,
+        QuoteStyle::Strict(false),
+        QuoteStyle::Strict(true),
+    ] {
         let config = Config::new().quote_style(style.clone());
         let err = try_parse(&config, b"a,b\\").unwrap_err();
         assert!(matches!(err, Error::Parser(_)), "{style:?}");
