@@ -79,7 +79,7 @@ impl Dfa for BitshiftDfa {
 
     #[inline(always)]
     fn is_record_end(&self, (_, state): Self::State) -> bool {
-        state == State::EndRecord as u64
+        state >= State::EndRecord as u64
     }
 
     #[inline(always)]

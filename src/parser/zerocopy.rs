@@ -84,7 +84,7 @@ impl<R: Read, D: Dfa> ZeroCopyParser<R, D> {
             if self.read_index == self.buffer.len() {
                 let Refill { shift, read } = self
                     .buffer
-                    .fill(&mut self.reader, record_start, self.read_index)
+                    .fill(&mut self.reader, record_start, self.read_index, 0)
                     .map_err(Error::IO)?;
                 field_start -= shift;
                 record_start -= shift;

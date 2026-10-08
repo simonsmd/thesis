@@ -1,7 +1,7 @@
 use std::io::{self, Read};
 
 /// Initial buffer size, and the read size [`Buffer::fill`] aims for.
-pub const DEFAULT_CAPACITY: usize = 8 * 1024;
+pub const DEFAULT_CAPACITY: usize = 64 * 1024;
 
 /// What a [`Buffer::fill`] did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,17 +95,21 @@ impl Buffer {
 
     /// Read the next chunk from `source`.
     ///
-    /// Keeps `data[keep_from..write]`, and reads over everything from `write`
-    /// on. The caller must have consumed the input up to [`len`](Buffer::len)
-    /// before calling this, since that is the space being read into.
+    /// Keeps `data[keep_from..write]`, and reads the new input `gap` bytes
+    /// after `write`, over everything from there on. The caller must have
+    /// consumed the input up to [`len`](Buffer::len) before calling this,
+    /// since that is the space being read into. The `gap` bytes in between
+    /// are left as they are: they are scratch space for the caller.
     ///
-    /// The kept bytes may move; see [`Refill::shift`]. On return the valid
-    /// bytes are `write - shift + read` long.
+    /// The kept bytes may move; see [`Refill::shift`]. On return the new input
+    /// starts at `write - shift + gap` and the valid bytes end `read` bytes
+    /// later.
     pub fn fill<R: Read>(
         &mut self,
         source: &mut R,
         keep_from: usize,
         write: usize,
+        gap: usize,
     ) -> io::Result<Refill> {
         debug_assert!(keep_from <= write && write <= self.filled);
 
@@ -114,20 +118,20 @@ impl Buffer {
         let min_free = (self.chunk / 2).max(1);
 
         let mut shift = 0;
-        if self.data.len() - write < min_free {
+        if self.data.len() - write < gap + min_free {
             // Drop everything before the record being assembled...
             if keep_from > 0 {
                 self.data.copy_within(keep_from..write, 0);
                 shift = keep_from;
             }
             // ...and grow if that record alone leaves no room to read into.
-            if self.data.len() - (write - shift) < min_free {
-                let len = (self.data.len() * 2).max(write - shift + self.chunk);
+            if self.data.len() - (write - shift) < gap + min_free {
+                let len = (self.data.len() * 2).max(write - shift + gap + self.chunk);
                 self.data.resize(len, 0);
             }
         }
 
-        let write = write - shift;
+        let write = write - shift + gap;
         self.filled = write;
 
         let read = loop {
@@ -178,18 +182,25 @@ mod tests {
     }
 
     /// A stand-in for `read_record`: copies the input into records of
-    /// `record_len` output bytes, dropping every `skip`th input byte.
-    fn parse(buffer: &mut Buffer, source: &mut impl Read, record_len: usize, skip: usize) -> Vec<Vec<u8>> {
+    /// `record_len` output bytes, dropping every `skip`th input byte, and
+    /// refills `gap` bytes after the write position.
+    fn parse(
+        buffer: &mut Buffer,
+        source: &mut impl Read,
+        record_len: usize,
+        skip: usize,
+        gap: usize,
+    ) -> Vec<Vec<u8>> {
         let (mut record_start, mut write, mut pos) = (0, 0, 0);
         let mut records = Vec::new();
         let mut seen = 0;
 
         loop {
             if pos == buffer.len() {
-                let refill = buffer.fill(source, record_start, write).unwrap();
+                let refill = buffer.fill(source, record_start, write, gap).unwrap();
                 record_start -= refill.shift;
                 write -= refill.shift;
-                pos = write;
+                pos = write + gap;
                 if refill.read == 0 {
                     break;
                 }
@@ -226,7 +237,7 @@ mod tests {
         let mut buffer = Buffer::with_capacity(16);
         let mut source = Trickle { data: &data, step: 7 };
 
-        let records = parse(&mut buffer, &mut source, 40, 0);
+        let records = parse(&mut buffer, &mut source, 40, 0, 0);
         assert_eq!(records.concat(), data);
         assert!(records.iter().all(|r| r.len() == 40));
     }
@@ -237,7 +248,7 @@ mod tests {
         let mut buffer = Buffer::with_capacity(16);
         let mut source = Trickle { data: &data, step: 5 };
 
-        let records = parse(&mut buffer, &mut source, 1000, 0);
+        let records = parse(&mut buffer, &mut source, 1000, 0, 0);
         assert_eq!(records, vec![data]);
         assert!(buffer.capacity() >= 1000);
     }
@@ -250,7 +261,7 @@ mod tests {
         let mut buffer = Buffer::with_capacity(64);
         let mut source = Trickle { data: &data, step: 13 };
 
-        let records = parse(&mut buffer, &mut source, 8, 0);
+        let records = parse(&mut buffer, &mut source, 8, 0, 0);
         assert_eq!(records.concat(), data);
         assert_eq!(buffer.capacity(), 64);
     }
@@ -268,8 +279,41 @@ mod tests {
         let mut buffer = Buffer::with_capacity(16);
         let mut source = Trickle { data: &data, step: 7 };
 
-        let records = parse(&mut buffer, &mut source, 25, 3);
+        let records = parse(&mut buffer, &mut source, 25, 3, 0);
         assert_eq!(records.concat(), expected);
+    }
+
+    #[test]
+    fn a_gap_is_left_between_the_kept_bytes_and_the_new_input() {
+        let data = source_bytes(1000);
+        let expected: Vec<u8> = data
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| i % 3 != 0)
+            .map(|(_, b)| *b)
+            .collect();
+
+        // small and large records, so refills both reclaim space and grow
+        for record_len in [5, 400] {
+            let mut buffer = Buffer::with_capacity(16);
+            let mut source = Trickle { data: &data, step: 7 };
+
+            let records = parse(&mut buffer, &mut source, record_len, 3, 10);
+            assert_eq!(records.concat(), expected);
+        }
+    }
+
+    #[test]
+    fn fill_leaves_the_gap_before_the_new_input() {
+        let mut buffer = Buffer::with_capacity(8);
+        let mut source = Trickle { data: b"abcdef", step: 3 };
+
+        assert_eq!(buffer.fill(&mut source, 0, 0, 4).unwrap(), Refill { shift: 0, read: 3 });
+        assert_eq!(&buffer.data()[4..], b"abc");
+        assert_eq!(buffer.source_offset(4), 0);
+        assert_eq!(buffer.fill(&mut source, 0, 2, 4).unwrap(), Refill { shift: 0, read: 3 });
+        assert_eq!(&buffer.data()[6..], b"def");
+        assert_eq!(buffer.source_offset(6), 3);
     }
 
     #[test]
@@ -277,9 +321,9 @@ mod tests {
         let mut buffer = Buffer::with_capacity(8);
         let mut source = Trickle { data: b"ab", step: 8 };
 
-        assert_eq!(buffer.fill(&mut source, 0, 0).unwrap(), Refill { shift: 0, read: 2 });
+        assert_eq!(buffer.fill(&mut source, 0, 0, 0).unwrap(), Refill { shift: 0, read: 2 });
         assert_eq!(buffer.data(), b"ab");
-        assert_eq!(buffer.fill(&mut source, 0, 2).unwrap(), Refill { shift: 0, read: 0 });
+        assert_eq!(buffer.fill(&mut source, 0, 2, 0).unwrap(), Refill { shift: 0, read: 0 });
         assert_eq!(buffer.data(), b"ab");
         assert_eq!(buffer.bytes_read(), 2);
     }

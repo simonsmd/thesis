@@ -1,6 +1,6 @@
 use std::{io::Read, str::Utf8Error};
 
-use super::{Error, Exit, INITIAL_FIELDS, Position};
+use super::{Error, Exit, Position};
 use crate::{
     buffer::{Buffer, DEFAULT_CAPACITY, Refill},
     config::{Config, QuoteStyle},
@@ -40,7 +40,7 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
             reader,
             buffer: Buffer::with_capacity(capacity),
             read_index: 0,
-            field_ends: vec![0; INITIAL_FIELDS],
+            field_ends: vec![0; DEFAULT_CAPACITY + 1024],
             position: Position::default(),
             error: false,
         }
@@ -85,15 +85,15 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
         let is_error = loop {
             if self.read_index == self.buffer.len() {
                 // read the new input MIN_GAP bytes after the write index, so the gap does not
-                // drop to zero for the rest of the record
-                let read_from = self.read_index.min(write + MIN_GAP);
+                // drop below MIN_GAP for the rest of the record
+                // TODO: make continuing after IO errors safe
                 let Refill { shift, read } = self
                     .buffer
-                    .fill(&mut self.reader, record_start, read_from)
+                    .fill(&mut self.reader, record_start, write, MIN_GAP)
                     .map_err(Error::IO)?;
                 record_start -= shift;
                 write -= shift;
-                self.read_index = read_from - shift;
+                self.read_index = write + MIN_GAP;
 
                 if read == 0 {
                     if (self.dfa.in_quoted_field(state)
@@ -128,7 +128,9 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
                 state = dfa.transition(state, byte);
 
                 // SAFETY: write <= read < buffer.len()
-                unsafe { *buffer.get_unchecked_mut(write) = byte; }
+                unsafe {
+                    *buffer.get_unchecked_mut(write) = byte;
+                }
                 write += dfa.is_output(state) as usize;
                 read += 1;
 
@@ -174,6 +176,137 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
         }
 
         self.position.record += 1;
+
+        Ok(Some(Record {
+            buffer: &self.buffer.data()[record_start..write],
+            field_ends: &self.field_ends[..field_count],
+        }))
+    }
+
+    #[inline]
+    pub fn read_record_branchless(&mut self) -> Result<Option<Record<'_>>, Error> {
+        if self.error {
+            return Err(Error::Parser(self.position));
+        }
+
+        // Start the compacted record with a gap to the read index: if write trails read by only a
+        // few bytes the cpu falsely detects a conflict between the store (whose address is known
+        // late) and the loads of the next bytes, and flushes the pipeline or stops loading ahead
+        let mut record_start = self.read_index.saturating_sub(MIN_GAP);
+        let mut write = record_start;
+        let mut field_count = 0;
+
+        // A record always starts in the StartRecord (equivalent to EndRecord) state so there is no
+        // need to store the DFA state between records
+        let mut state = self.dfa.start_state();
+
+        let is_error = loop {
+            if self.read_index == self.buffer.len() {
+                // read the new input MIN_GAP bytes after the write index, so the gap does not
+                // drop below MIN_GAP for the rest of the record
+                // TODO: make continuing after IO errors safe
+                let Refill { shift, read } = self
+                    .buffer
+                    .fill(&mut self.reader, record_start, write, MIN_GAP)
+                    .map_err(Error::IO)?;
+                record_start -= shift;
+                write -= shift;
+                self.read_index = write + MIN_GAP;
+
+                for i in 0..field_count {
+                    self.field_ends[i] -= shift;
+                }
+
+                // resize field_ends if there is not enough space for the maximum possible amount
+                // of fields (one per input byte)
+                if self.field_ends.len() - field_count < self.buffer.len() {
+                    self.field_ends.resize(self.buffer.capacity() + 1024, 0);
+                }
+
+                if read == 0 {
+                    if (self.dfa.in_quoted_field(state)
+                        && matches!(self.config.quote_style, QuoteStyle::Strict(_)))
+                        || self.dfa.in_escape_sequence(state)
+                    {
+                        break true;
+                    }
+
+                    if write == record_start && field_count == 0 {
+                        return Ok(None);
+                    }
+
+                    self.field_ends[field_count] = write;
+                    field_count += 1;
+                    break false;
+                }
+            }
+
+            // keep variables used in the hotloop in registers
+            let dfa = &self.dfa;
+            let buffer = self.buffer.data_mut();
+            let field_ends = self.field_ends.as_mut_slice();
+            let mut read = self.read_index;
+
+            let exit = loop {
+                if read >= buffer.len() {
+                    break Exit::Refill;
+                }
+
+                let byte = buffer[read];
+                state = dfa.transition(state, byte);
+
+                // SAFETY: write <= read < buffer.len()
+                unsafe {
+                    *buffer.get_unchecked_mut(write) = byte;
+                }
+                write += dfa.is_output(state) as usize;
+                read += 1;
+
+                // SAFETY: The refill path ensures that the field_ends buffer is always large
+                // enough (there can never be more than one field per byte)
+                unsafe {
+                    *field_ends.get_unchecked_mut(field_count) = write;
+                }
+                field_count += dfa.is_field_end(state) as usize;
+
+                if dfa.is_record_end(state) {
+                    if dfa.is_error(state) {
+                        // report the byte where the error occured which was not consumed
+                        read -= 1;
+                        field_count -= 1;
+                        break Exit::Error;
+                    }
+
+                    break Exit::EndRecord;
+                }
+            };
+
+            self.read_index = read;
+
+            match exit {
+                Exit::Refill => {}
+                Exit::FieldEndsFull => {
+                    let len = self.field_ends.len() * 2;
+                    self.field_ends.resize(len, 0);
+                }
+                Exit::EndRecord => break false,
+                Exit::Error => break true,
+            }
+        };
+
+        self.position.byte = self.buffer.source_offset(self.read_index);
+
+        if is_error {
+            self.error = true;
+            self.position.field = field_count;
+            return Err(Error::Parser(self.position));
+        }
+
+        self.position.record += 1;
+
+        for i in 0..field_count {
+            self.field_ends[i] -= record_start;
+        }
 
         Ok(Some(Record {
             buffer: &self.buffer.data()[record_start..write],

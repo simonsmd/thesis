@@ -41,6 +41,9 @@ pub trait Dfa {
     /// A record end or error is also the end of a field.
     fn is_field_end(&self, state: Self::State) -> bool;
 
+    /// Check if the current state marks the end of a record
+    ///
+    /// An error is also the end of a record.
     fn is_record_end(&self, state: Self::State) -> bool;
 
     fn is_error(&self, state: Self::State) -> bool;

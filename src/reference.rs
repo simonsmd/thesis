@@ -163,7 +163,7 @@ impl Dfa for ReferenceDfa {
 
     #[inline(always)]
     fn is_record_end(&self, (state, _): Self::State) -> bool {
-        state == State::EndRecord
+        matches!(state, State::EndRecord | State::Error)
     }
 
     #[inline(always)]

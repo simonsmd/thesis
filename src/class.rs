@@ -147,7 +147,7 @@ impl Dfa for ClassDfa {
 
     #[inline(always)]
     fn is_record_end(&self, state: Self::State) -> bool {
-        state == state_to_index(State::EndRecord) as usize
+        state >= state_to_index(State::EndRecord) as usize
     }
 
     #[inline(always)]
