@@ -13,6 +13,7 @@ use csv_parser::{
     config::Config,
     parser::{CompactionParser, Error, ZeroCopyParser},
     reference::ReferenceDfa,
+    skip::{CmpOr, Native, NibbleMap, ScalarSkip, Skip},
     table::TableDfa,
 };
 
@@ -88,6 +89,19 @@ macro_rules! engines_for {
             ZeroCopyParser::<_, $dfa>::with_capacity($input, $config.clone(), $capacity);
         let mut branchless =
             CompactionParser::<_, $dfa>::with_capacity($input, $config.clone(), $capacity);
+        let mut simd_scalar =
+            CompactionParser::<_, $dfa>::with_capacity($input, $config.clone(), $capacity);
+        let mut simd_cmp_or =
+            CompactionParser::<_, $dfa>::with_capacity($input, $config.clone(), $capacity);
+        let mut simd_check_cmp_or =
+            CompactionParser::<_, $dfa>::with_capacity($input, $config.clone(), $capacity);
+        let scalar_skip = ScalarSkip::new($config);
+        let mut simd_nibble_map =
+            CompactionParser::<_, $dfa>::with_capacity($input, $config.clone(), $capacity);
+        let mut simd_check_nibble_map =
+            CompactionParser::<_, $dfa>::with_capacity($input, $config.clone(), $capacity);
+        let cmp_or = CmpOr::<Native>::new($config);
+        let nibble_map = NibbleMap::<Native>::new($config);
         [
             (
                 concat!("compaction/", $name).to_string(),
@@ -103,6 +117,46 @@ macro_rules! engines_for {
                 Box::new(move || {
                     branchless
                         .read_record_branchless()
+                        .map(|r| r.map(|r| strings(r.iter())))
+                }),
+            ),
+            (
+                concat!("compaction-simd-scalar/", $name).to_string(),
+                Box::new(move || {
+                    simd_scalar
+                        .read_record_simd(scalar_skip)
+                        .map(|r| r.map(|r| strings(r.iter())))
+                }),
+            ),
+            (
+                concat!("compaction-simd-cmp-or/", $name).to_string(),
+                Box::new(move || {
+                    simd_cmp_or
+                        .read_record_simd(cmp_or)
+                        .map(|r| r.map(|r| strings(r.iter())))
+                }),
+            ),
+            (
+                concat!("compaction-simd-check-cmp-or/", $name).to_string(),
+                Box::new(move || {
+                    simd_check_cmp_or
+                        .read_record_simd_check(cmp_or)
+                        .map(|r| r.map(|r| strings(r.iter())))
+                }),
+            ),
+            (
+                concat!("compaction-simd-nibble-map/", $name).to_string(),
+                Box::new(move || {
+                    simd_nibble_map
+                        .read_record_simd(nibble_map)
+                        .map(|r| r.map(|r| strings(r.iter())))
+                }),
+            ),
+            (
+                concat!("compaction-simd-check-nibble-map/", $name).to_string(),
+                Box::new(move || {
+                    simd_check_nibble_map
+                        .read_record_simd_check(nibble_map)
                         .map(|r| r.map(|r| strings(r.iter())))
                 }),
             ),

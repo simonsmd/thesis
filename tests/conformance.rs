@@ -85,6 +85,28 @@ fn a_record_longer_than_the_buffer_grows_it() {
 }
 
 #[test]
+fn fields_around_the_skip_block_size() {
+    // read_record_simd skips field content in blocks of 64 bytes, so put field ends, closing
+    // quotes, escapes and doubled quotes on both sides of a block boundary and of a refill.
+    for len in [1, 62, 63, 64, 65, 66, 127, 128, 129, 200] {
+        let plain = "p".repeat(len);
+        let quoted: String = "q,\n".chars().cycle().take(len).collect();
+        let escaped = format!("{}\\,eee", "e".repeat(len));
+        let doubled = format!("\"{}\"\"ddd\"", "d".repeat(len));
+        let input = format!("{plain},\"{quoted}\",{escaped},{doubled}\r\n{plain}\r\n");
+
+        let escaped = format!("{},eee", "e".repeat(len));
+        let doubled = format!("{}\"ddd", "d".repeat(len));
+        let expected = rows(&[&[&plain, &quoted, &escaped, &doubled], &[&plain]]);
+
+        for capacity in [1, 7, 64, 65, 300, 4096] {
+            let parsed = parse_with_capacity(&Config::new(), input.as_bytes(), capacity).unwrap();
+            assert_eq!(parsed, expected, "{len} byte fields with a {capacity} byte buffer");
+        }
+    }
+}
+
+#[test]
 fn records_with_many_fields() {
     // Crosses the parser's field slot growth, which starts at 1024, both
     // mid-record and on the final field at end of input.
