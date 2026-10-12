@@ -1,11 +1,19 @@
-[package]
-name = "csv-parser"
+[workspace]
+resolver = "3"
+members = ["parser", "harness"]
+# Built by `cargo fuzz` with nightly and sanitizer flags, so it stays out of
+# `cargo build/test --workspace`.
+exclude = ["fuzz"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 
-[dependencies]
+[workspace.dependencies]
+csv-parser = { path = "parser" }
 fearless_simd = "1.1"
 
 [profile.release]
 debug = true
 codegen-units = 1
+lto = "fat"

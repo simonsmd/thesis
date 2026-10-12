@@ -1,0 +1,7 @@
+[package]
+name = "csv-parser"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+fearless_simd.workspace = true

@@ -1,11 +1,14 @@
 use std::{io::Read, str::Utf8Error};
 
-use super::{Error, Exit, INITIAL_FIELDS, Position};
+use super::{Error, Exit, Position};
 use crate::{
     buffer::{Buffer, DEFAULT_CAPACITY, Refill},
     config::{Config, QuoteStyle},
     dfa::Dfa,
 };
+
+/// Initial size of the field buffers.
+pub const DEFAULT_FIELDS: usize = 4096;
 
 #[derive(Debug)]
 pub struct ZeroCopyParser<R: Read, D: Dfa> {
@@ -30,12 +33,13 @@ impl<R: Read, D: Dfa> ZeroCopyParser<R, D> {
     }
 
     pub fn with_config(reader: R, config: Config) -> Self {
-        Self::with_capacity(reader, config, DEFAULT_CAPACITY)
+        Self::with_capacity(reader, config, DEFAULT_CAPACITY, DEFAULT_FIELDS)
     }
 
-    /// `capacity` is the read size; the buffer only grows past it for records
-    /// that do not fit.
-    pub fn with_capacity(reader: R, config: Config, capacity: usize) -> Self {
+    /// `capacity` is the read size; the buffer only grows past it for records that do not fit.
+    /// `fields` is the initial size of the field buffers, which grow on demand. Small sizes of
+    /// either exercise the growth paths in tests.
+    pub fn with_capacity(reader: R, config: Config, capacity: usize, fields: usize) -> Self {
         let dfa = D::new(&config);
         Self {
             config,
@@ -43,11 +47,20 @@ impl<R: Read, D: Dfa> ZeroCopyParser<R, D> {
             reader,
             buffer: Buffer::with_capacity(capacity),
             read_index: 0,
-            field_starts: vec![0; INITIAL_FIELDS],
-            field_ends: vec![0; INITIAL_FIELDS],
+            field_starts: vec![0; fields.max(1)],
+            field_ends: vec![0; fields.max(1)],
             position: Position::default(),
             error: false,
         }
+    }
+
+    /// Start over on a new input, keeping the DFA and the allocated buffers.
+    pub fn reset(&mut self, reader: R) {
+        self.reader = reader;
+        self.buffer.clear();
+        self.read_index = 0;
+        self.position = Position::default();
+        self.error = false;
     }
 
     pub fn position(&self) -> Position {

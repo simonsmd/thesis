@@ -11,7 +11,7 @@ use csv_parser::{
     bitshift::BitshiftDfa,
     class::ClassDfa,
     config::Config,
-    parser::{CompactionParser, Error, ZeroCopyParser},
+    parser::{CompactionParser, Error, ZeroCopyParser, compaction, zerocopy},
     reference::ReferenceDfa,
     skip::{CmpOr, Native, NibbleMap, ScalarSkip, Skip},
     table::TableDfa,
@@ -84,22 +84,22 @@ fn disagreements(reference: &str, expected: &str, actual: impl Iterator<Item = (
 macro_rules! engines_for {
     ($dfa:ty, $name:literal, $config:expr, $input:expr, $capacity:expr) => {{
         let mut compaction =
-            CompactionParser::<_, $dfa>::with_capacity($input, $config.clone(), $capacity);
+            CompactionParser::<_, $dfa>::with_capacity($input, $config.clone(), $capacity, compaction::DEFAULT_FIELDS);
         let mut zerocopy =
-            ZeroCopyParser::<_, $dfa>::with_capacity($input, $config.clone(), $capacity);
+            ZeroCopyParser::<_, $dfa>::with_capacity($input, $config.clone(), $capacity, zerocopy::DEFAULT_FIELDS);
         let mut branchless =
-            CompactionParser::<_, $dfa>::with_capacity($input, $config.clone(), $capacity);
+            CompactionParser::<_, $dfa>::with_capacity($input, $config.clone(), $capacity, compaction::DEFAULT_FIELDS);
         let mut simd_scalar =
-            CompactionParser::<_, $dfa>::with_capacity($input, $config.clone(), $capacity);
+            CompactionParser::<_, $dfa>::with_capacity($input, $config.clone(), $capacity, compaction::DEFAULT_FIELDS);
         let mut simd_cmp_or =
-            CompactionParser::<_, $dfa>::with_capacity($input, $config.clone(), $capacity);
+            CompactionParser::<_, $dfa>::with_capacity($input, $config.clone(), $capacity, compaction::DEFAULT_FIELDS);
         let mut simd_check_cmp_or =
-            CompactionParser::<_, $dfa>::with_capacity($input, $config.clone(), $capacity);
+            CompactionParser::<_, $dfa>::with_capacity($input, $config.clone(), $capacity, compaction::DEFAULT_FIELDS);
         let scalar_skip = ScalarSkip::new($config);
         let mut simd_nibble_map =
-            CompactionParser::<_, $dfa>::with_capacity($input, $config.clone(), $capacity);
+            CompactionParser::<_, $dfa>::with_capacity($input, $config.clone(), $capacity, compaction::DEFAULT_FIELDS);
         let mut simd_check_nibble_map =
-            CompactionParser::<_, $dfa>::with_capacity($input, $config.clone(), $capacity);
+            CompactionParser::<_, $dfa>::with_capacity($input, $config.clone(), $capacity, compaction::DEFAULT_FIELDS);
         let cmp_or = CmpOr::<Native>::new($config);
         let nibble_map = NibbleMap::<Native>::new($config);
         [

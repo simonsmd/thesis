@@ -1,0 +1,6 @@
+[build]
+rustflags = [
+    "-C", "target-cpu=native",
+    "-C", "llvm-args=-align-loops=64",
+    "-C", "llvm-args=-align-all-functions=6", # 64B
+]

@@ -1,0 +1,29 @@
+[package]
+name = "csv-parser-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+harness = { path = "../harness" }
+libfuzzer-sys = "0.4"
+
+[[bin]]
+name = "differential"
+path = "fuzz_targets/differential.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rust_csv"
+path = "fuzz_targets/rust_csv.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+debug = 1

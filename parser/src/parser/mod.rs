@@ -15,9 +15,6 @@ use std::fmt::Display;
 pub use compaction::CompactionParser;
 pub use zerocopy::ZeroCopyParser;
 
-/// Initial size for the field_ends buffer
-const INITIAL_FIELDS: usize = 4096;
-
 /// Why the core loop of `read_record` stopped.
 enum Exit {
     EndRecord,

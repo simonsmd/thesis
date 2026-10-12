@@ -67,6 +67,13 @@ impl Buffer {
         }
     }
 
+    /// Forget all bytes, to read a new source from the start. Keeps the allocation, including
+    /// any growth.
+    pub fn clear(&mut self) {
+        self.filled = 0;
+        self.read_total = 0;
+    }
+
     /// Current size of the allocation.
     pub fn capacity(&self) -> usize {
         self.data.len()

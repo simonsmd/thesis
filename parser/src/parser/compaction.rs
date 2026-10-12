@@ -8,6 +8,10 @@ use crate::{
     skip::{BLOCK, Skip},
 };
 
+/// Initial size of the field end buffer: `read_record_branchless` writes a field end for every
+/// buffered byte, so it needs one entry per byte of a default size buffer.
+pub const DEFAULT_FIELDS: usize = DEFAULT_CAPACITY + 1024;
+
 #[derive(Debug)]
 pub struct CompactionParser<R: Read, D: Dfa> {
     config: Config,
@@ -28,12 +32,13 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
     }
 
     pub fn with_config(reader: R, config: Config) -> Self {
-        Self::with_capacity(reader, config, DEFAULT_CAPACITY)
+        Self::with_capacity(reader, config, DEFAULT_CAPACITY, DEFAULT_FIELDS)
     }
 
-    /// `capacity` is the read size; the buffer only grows past it for records
-    /// that do not fit.
-    pub fn with_capacity(reader: R, config: Config, capacity: usize) -> Self {
+    /// `capacity` is the read size; the buffer only grows past it for records that do not fit.
+    /// `fields` is the initial size of the field end buffer, which grows on demand. Small sizes of
+    /// either exercise the growth paths in tests.
+    pub fn with_capacity(reader: R, config: Config, capacity: usize, fields: usize) -> Self {
         let dfa = D::new(&config);
         Self {
             config,
@@ -41,10 +46,19 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
             reader,
             buffer: Buffer::with_capacity(capacity),
             read_index: 0,
-            field_ends: vec![0; DEFAULT_CAPACITY + 1024],
+            field_ends: vec![0; fields.max(1)],
             position: Position::default(),
             error: false,
         }
+    }
+
+    /// Start over on a new input, keeping the DFA and the allocated buffers.
+    pub fn reset(&mut self, reader: R) {
+        self.reader = reader;
+        self.buffer.clear();
+        self.read_index = 0;
+        self.position = Position::default();
+        self.error = false;
     }
 
     pub fn position(&self) -> Position {

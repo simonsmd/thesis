@@ -1,7 +1,7 @@
 pub mod config;
 pub mod dfa;
 pub mod parser;
-mod buffer;
+pub mod buffer;
 pub mod reference;
 pub mod table;
 pub mod bitshift;
