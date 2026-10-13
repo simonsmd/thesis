@@ -1,0 +1,26 @@
+[project]
+name = "csvscrape"
+version = "0.1.0"
+description = "Scrape csv files from GitHub and Kaggle"
+requires-python = ">=3.11"
+
+dependencies = [
+    "requests>=2.31",
+    "zstandard>=0.22",
+    "charset-normalizer>=3.4",
+    "chardet>=5.0",
+    "clevercsv>=0.8",
+    "duckdb>=1.0",
+    "polars>=1.0",
+    "pyarrow>=15",
+]
+
+[project.scripts]
+csvscrape = "csvscrape.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["csvscrape*"]

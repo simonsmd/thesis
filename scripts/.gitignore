@@ -1,0 +1,10 @@
+# Credentials
+github_token
+kaggle_token
+*_token
+
+data/
+
+__pycache__/
+*.pyc
+*.egg-info/

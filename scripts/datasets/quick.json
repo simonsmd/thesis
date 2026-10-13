@@ -1,0 +1,776 @@
+{
+ "dataset": {
+  "name": "quick",
+  "selector": "hand-picked from benchmark-test",
+  "note": "One file per input shape, 4-23 MiB each",
+  "files": 10,
+  "bytes": 115115921
+ },
+ "files": {
+  "013e3cafa85246b80e9226c30d44c52661aa120f": {
+   "repo": "jalbertbowden/virginia-lehd-data",
+   "path": "data/race-by-ethnicity-tabulations/no-firm-size-or-age-detail/metropolitan-micropolitan-state-parts/naics-industry-groups/rh-f-gm-n4-state-local-private-ownership-categories-qwi-code-a00-not-seasonally-adjusted/5147900-2001.csv",
+   "ref": "0ab745d6d4e986e9375864cfd28edb7725ff0dda",
+   "lfs": false,
+   "size": 4989192,
+   "bucket": 22,
+   "windows": 1,
+   "sniffers": {
+    "custom": {
+     "delimiter": ",",
+     "terminator": "crlf",
+     "quote": null,
+     "quote_style": null,
+     "quotes_in_unquoted_fields": null,
+     "escape": null,
+     "escape_in_unquoted_fields": false,
+     "double_quote_escape": false,
+     "comment": null
+    },
+    "clevercsv": {
+     "delimiter": ",",
+     "terminator": null,
+     "quote": null,
+     "quote_style": null,
+     "quotes_in_unquoted_fields": null,
+     "escape": null,
+     "escape_in_unquoted_fields": null,
+     "double_quote_escape": null,
+     "comment": null
+    },
+    "duckdb": {
+     "delimiter": ",",
+     "terminator": "crlf",
+     "quote": null,
+     "quote_style": null,
+     "quotes_in_unquoted_fields": null,
+     "escape": null,
+     "escape_in_unquoted_fields": null,
+     "double_quote_escape": null,
+     "comment": null
+    }
+   },
+   "dialect": {
+    "delimiter": ",",
+    "terminator": "crlf",
+    "quote": null,
+    "quote_style": null,
+    "quotes_in_unquoted_fields": null,
+    "escape": null,
+    "escape_in_unquoted_fields": false,
+    "double_quote_escape": false,
+    "comment": null
+   },
+   "agreement": 3,
+   "contested": [],
+   "encoding": {
+    "class": "ascii",
+    "detected": "ascii",
+    "bom": null,
+    "wide": null,
+    "magic": null,
+    "control_frac": 0.0,
+    "chardet": "ascii"
+   },
+   "consistency": {
+    "scanned": 4989192,
+    "records": 24151,
+    "modal_fields": 80,
+    "modal_share": 1.0,
+    "quotes": 0,
+    "comments": 0
+   },
+   "why": "short numeric fields, CRLF"
+  },
+  "4446be5880daa7e21be196af3cf62b7fe79afc2e": {
+   "repo": "Zafar-Lab/PHALCON_reproducibility",
+   "path": "simulation/Back increased/Final Phylovar results/Data_5/Cell_level_information_phylovar.csv",
+   "ref": "fe372951683a5740c48b2b0ea9e821f9c74f37e0",
+   "lfs": false,
+   "size": 21739036,
+   "bucket": 24,
+   "windows": 3,
+   "sniffers": {
+    "custom": {
+     "delimiter": ",",
+     "terminator": "\n",
+     "quote": null,
+     "quote_style": null,
+     "quotes_in_unquoted_fields": null,
+     "escape": null,
+     "escape_in_unquoted_fields": false,
+     "double_quote_escape": false,
+     "comment": null
+    },
+    "clevercsv": {
+     "delimiter": ",",
+     "terminator": null,
+     "quote": null,
+     "quote_style": null,
+     "quotes_in_unquoted_fields": null,
+     "escape": null,
+     "escape_in_unquoted_fields": null,
+     "double_quote_escape": null,
+     "comment": null
+    },
+    "duckdb": {
+     "delimiter": ",",
+     "terminator": "\n",
+     "quote": null,
+     "quote_style": null,
+     "quotes_in_unquoted_fields": null,
+     "escape": null,
+     "escape_in_unquoted_fields": null,
+     "double_quote_escape": null,
+     "comment": null
+    }
+   },
+   "dialect": {
+    "delimiter": ",",
+    "terminator": "\n",
+    "quote": null,
+    "quote_style": null,
+    "quotes_in_unquoted_fields": null,
+    "escape": null,
+    "escape_in_unquoted_fields": false,
+    "double_quote_escape": false,
+    "comment": null
+   },
+   "agreement": 3,
+   "contested": [],
+   "encoding": {
+    "class": "ascii",
+    "detected": "ascii",
+    "bom": null,
+    "wide": null,
+    "magic": null,
+    "control_frac": 0.0,
+    "chardet": "ascii"
+   },
+   "window_delimiters": [
+    ",",
+    ",",
+    ","
+   ],
+   "consistency": {
+    "scanned": 21739036,
+    "records": 5427,
+    "modal_fields": 2001,
+    "modal_share": 1.0,
+    "quotes": 0,
+    "comments": 0
+   },
+   "why": "2 B fields, 2001 columns: field ends dominate"
+  },
+  "570e3d0078c19c3c0fa85b824606c827a1fbcdce": {
+   "repo": "umeshtharukaofficial/bio-datasets-1M",
+   "path": "datasets/bioinformatics/bioinformatics_25019_p9wxjq.csv",
+   "ref": "bdef0ab41d5750267b7f9775358db746fb0b8f16",
+   "lfs": false,
+   "size": 4892009,
+   "bucket": 22,
+   "windows": 1,
+   "sniffers": {
+    "custom": {
+     "delimiter": ",",
+     "terminator": "\n",
+     "quote": null,
+     "quote_style": null,
+     "quotes_in_unquoted_fields": null,
+     "escape": null,
+     "escape_in_unquoted_fields": false,
+     "double_quote_escape": false,
+     "comment": null
+    },
+    "clevercsv": {
+     "delimiter": ",",
+     "terminator": null,
+     "quote": null,
+     "quote_style": null,
+     "quotes_in_unquoted_fields": null,
+     "escape": null,
+     "escape_in_unquoted_fields": null,
+     "double_quote_escape": null,
+     "comment": null
+    },
+    "duckdb": {
+     "delimiter": ",",
+     "terminator": "\n",
+     "quote": null,
+     "quote_style": null,
+     "quotes_in_unquoted_fields": null,
+     "escape": null,
+     "escape_in_unquoted_fields": null,
+     "double_quote_escape": null,
+     "comment": null
+    }
+   },
+   "dialect": {
+    "delimiter": ",",
+    "terminator": "\n",
+    "quote": null,
+    "quote_style": null,
+    "quotes_in_unquoted_fields": null,
+    "escape": null,
+    "escape_in_unquoted_fields": false,
+    "double_quote_escape": false,
+    "comment": null
+   },
+   "agreement": 3,
+   "contested": [],
+   "encoding": {
+    "class": "ascii",
+    "detected": "ascii",
+    "bom": null,
+    "wide": null,
+    "magic": null,
+    "control_frac": 0.0,
+    "chardet": "ascii"
+   },
+   "consistency": {
+    "scanned": 4892009,
+    "records": 4574,
+    "modal_fields": 5,
+    "modal_share": 1.0,
+    "quotes": 0,
+    "comments": 0
+   },
+   "why": "214 B unquoted fields: long runs without structure"
+  },
+  "5f34ed543c54d32fa9f6a1a92bbeb255aec03130": {
+   "repo": "FreddieNIU/Financial-Graph-Evaluation",
+   "path": "data/SPNews_v2/raw/news/preprocessed_tickerwise/NEM_news.csv",
+   "ref": "d19aa5e81cd1768d8b0958cc2a1ed505ba1e5b0a",
+   "lfs": false,
+   "size": 24239713,
+   "bucket": 24,
+   "windows": 3,
+   "sniffers": {
+    "custom": {
+     "delimiter": ",",
+     "terminator": "\n",
+     "quote": "\"",
+     "quote_style": "strict",
+     "quotes_in_unquoted_fields": false,
+     "escape": "\\",
+     "escape_in_unquoted_fields": false,
+     "double_quote_escape": true,
+     "comment": null
+    },
+    "clevercsv": {
+     "delimiter": ",",
+     "terminator": null,
+     "quote": "\"",
+     "quote_style": null,
+     "quotes_in_unquoted_fields": null,
+     "escape": null,
+     "escape_in_unquoted_fields": null,
+     "double_quote_escape": null,
+     "comment": null
+    },
+    "duckdb": {
+     "delimiter": ",",
+     "terminator": "\n",
+     "quote": "\"",
+     "quote_style": null,
+     "quotes_in_unquoted_fields": null,
+     "escape": null,
+     "escape_in_unquoted_fields": null,
+     "double_quote_escape": true,
+     "comment": null
+    }
+   },
+   "dialect": {
+    "delimiter": ",",
+    "terminator": "\n",
+    "quote": "\"",
+    "quote_style": "strict",
+    "quotes_in_unquoted_fields": false,
+    "escape": "\\",
+    "escape_in_unquoted_fields": false,
+    "double_quote_escape": true,
+    "comment": null
+   },
+   "agreement": 3,
+   "contested": [],
+   "encoding": {
+    "class": "utf-8",
+    "detected": "utf-8",
+    "bom": null,
+    "wide": null,
+    "magic": null,
+    "control_frac": 0.0,
+    "chardet": "utf-8"
+   },
+   "window_delimiters": [
+    ",",
+    ",",
+    ","
+   ],
+   "consistency": {
+    "scanned": 24239713,
+    "records": 4240,
+    "modal_fields": 10,
+    "modal_share": 1.0,
+    "quotes": 52556,
+    "comments": 0
+   },
+   "why": "quoted news text with backslash escapes"
+  },
+  "901f5b0b318d78adccb894ef7548d9d7fa9c39f0": {
+   "repo": "lizbethkr/PHIT-Project-1",
+   "path": "data/raw/ghcn_raw/USW00023257_2022.psv",
+   "ref": "c0bb0eec37f8dffff6130876bc3d358f9701c03f",
+   "lfs": false,
+   "size": 8399384,
+   "bucket": 23,
+   "windows": 1,
+   "sniffers": {
+    "custom": {
+     "delimiter": "|",
+     "terminator": "\n",
+     "quote": null,
+     "quote_style": null,
+     "quotes_in_unquoted_fields": null,
+     "escape": null,
+     "escape_in_unquoted_fields": false,
+     "double_quote_escape": false,
+     "comment": null
+    },
+    "clevercsv": {
+     "delimiter": "|",
+     "terminator": null,
+     "quote": null,
+     "quote_style": null,
+     "quotes_in_unquoted_fields": null,
+     "escape": null,
+     "escape_in_unquoted_fields": null,
+     "double_quote_escape": null,
+     "comment": null
+    },
+    "duckdb": {
+     "delimiter": "|",
+     "terminator": "\n",
+     "quote": null,
+     "quote_style": null,
+     "quotes_in_unquoted_fields": null,
+     "escape": null,
+     "escape_in_unquoted_fields": null,
+     "double_quote_escape": null,
+     "comment": null
+    }
+   },
+   "dialect": {
+    "delimiter": "|",
+    "terminator": "\n",
+    "quote": null,
+    "quote_style": null,
+    "quotes_in_unquoted_fields": null,
+    "escape": null,
+    "escape_in_unquoted_fields": false,
+    "double_quote_escape": false,
+    "comment": null
+   },
+   "agreement": 3,
+   "contested": [],
+   "encoding": {
+    "class": "ascii",
+    "detected": "ascii",
+    "bom": null,
+    "wide": null,
+    "magic": null,
+    "control_frac": 0.0,
+    "chardet": "ascii"
+   },
+   "consistency": {
+    "scanned": 8399384,
+    "records": 10256,
+    "modal_fields": 190,
+    "modal_share": 1.0,
+    "quotes": 0,
+    "comments": 0
+   },
+   "why": "pipe-separated, 190 columns"
+  },
+  "976a57865faf6815c0f4f746f816a64e41f5efcc94fde851c1a6eacca460a6c3": {
+   "repo": "devAdam117/bitcoin-futures-trading-strategies",
+   "path": "main/src/tradingStartegies/data/15m2024_02_04_to_2024_02_10/SOL.csv",
+   "ref": "2b952349af69f44f27a47a815ea7396a32899492",
+   "lfs": true,
+   "size": 7948445,
+   "bucket": 22,
+   "windows": 1,
+   "sniffers": {
+    "custom": {
+     "delimiter": ",",
+     "terminator": "\n",
+     "quote": null,
+     "quote_style": null,
+     "quotes_in_unquoted_fields": null,
+     "escape": null,
+     "escape_in_unquoted_fields": false,
+     "double_quote_escape": false,
+     "comment": null
+    },
+    "clevercsv": {
+     "delimiter": ",",
+     "terminator": null,
+     "quote": null,
+     "quote_style": null,
+     "quotes_in_unquoted_fields": null,
+     "escape": null,
+     "escape_in_unquoted_fields": null,
+     "double_quote_escape": null,
+     "comment": null
+    },
+    "duckdb": {
+     "delimiter": ",",
+     "terminator": "\n",
+     "quote": null,
+     "quote_style": null,
+     "quotes_in_unquoted_fields": null,
+     "escape": null,
+     "escape_in_unquoted_fields": null,
+     "double_quote_escape": null,
+     "comment": null
+    }
+   },
+   "dialect": {
+    "delimiter": ",",
+    "terminator": "\n",
+    "quote": null,
+    "quote_style": null,
+    "quotes_in_unquoted_fields": null,
+    "escape": null,
+    "escape_in_unquoted_fields": false,
+    "double_quote_escape": false,
+    "comment": null
+   },
+   "agreement": 3,
+   "contested": [],
+   "encoding": {
+    "class": "ascii",
+    "detected": "ascii",
+    "bom": null,
+    "wide": null,
+    "magic": null,
+    "control_frac": 0.0,
+    "chardet": "ascii"
+   },
+   "consistency": {
+    "scanned": 7948445,
+    "records": 73921,
+    "modal_fields": 12,
+    "modal_share": 1.0,
+    "quotes": 0,
+    "comments": 0
+   },
+   "why": "9 B numeric fields, 12 columns"
+  },
+  "a5b74b87b44c0b8a5cdb628b94689a3388162d30": {
+   "repo": "adindaregita/player-segmentation",
+   "path": "Experiment/TopicAssignedReviews.csv",
+   "ref": "31437f74ac6a5f807083ef72ff1d6dcef6669ac5",
+   "lfs": false,
+   "size": 7098805,
+   "bucket": 22,
+   "windows": 1,
+   "sniffers": {
+    "custom": {
+     "delimiter": ",",
+     "terminator": "\n",
+     "quote": "\"",
+     "quote_style": "strict",
+     "quotes_in_unquoted_fields": false,
+     "escape": null,
+     "escape_in_unquoted_fields": false,
+     "double_quote_escape": true,
+     "comment": null
+    },
+    "clevercsv": {
+     "delimiter": ",",
+     "terminator": null,
+     "quote": "\"",
+     "quote_style": null,
+     "quotes_in_unquoted_fields": null,
+     "escape": null,
+     "escape_in_unquoted_fields": null,
+     "double_quote_escape": null,
+     "comment": null
+    },
+    "duckdb": {
+     "delimiter": ",",
+     "terminator": "\n",
+     "quote": "\"",
+     "quote_style": null,
+     "quotes_in_unquoted_fields": null,
+     "escape": null,
+     "escape_in_unquoted_fields": null,
+     "double_quote_escape": true,
+     "comment": null
+    }
+   },
+   "dialect": {
+    "delimiter": ",",
+    "terminator": "\n",
+    "quote": "\"",
+    "quote_style": "strict",
+    "quotes_in_unquoted_fields": false,
+    "escape": null,
+    "escape_in_unquoted_fields": false,
+    "double_quote_escape": true,
+    "comment": null
+   },
+   "agreement": 3,
+   "contested": [],
+   "encoding": {
+    "class": "utf-8",
+    "detected": "utf-8",
+    "bom": null,
+    "wide": null,
+    "magic": null,
+    "control_frac": 0.0,
+    "chardet": "utf-8"
+   },
+   "consistency": {
+    "scanned": 7098805,
+    "records": 9565,
+    "modal_fields": 5,
+    "modal_share": 1.0,
+    "quotes": 18288,
+    "comments": 0
+   },
+   "why": "sparsely quoted free text, 148 B fields"
+  },
+  "beca7704645e61a88d1cc6abace298250eaec16e": {
+   "repo": "UCVeconomia2024-2/scripts",
+   "path": "data_in/wid_all_data-2/WID_data_SY.csv",
+   "ref": "46b33469ec336862244b6f95fd6c2d96d0cf1563",
+   "lfs": false,
+   "size": 8257545,
+   "bucket": 22,
+   "windows": 1,
+   "sniffers": {
+    "custom": {
+     "delimiter": ";",
+     "terminator": "\n",
+     "quote": null,
+     "quote_style": null,
+     "quotes_in_unquoted_fields": null,
+     "escape": null,
+     "escape_in_unquoted_fields": false,
+     "double_quote_escape": false,
+     "comment": null
+    },
+    "clevercsv": {
+     "delimiter": ";",
+     "terminator": null,
+     "quote": null,
+     "quote_style": null,
+     "quotes_in_unquoted_fields": null,
+     "escape": null,
+     "escape_in_unquoted_fields": null,
+     "double_quote_escape": null,
+     "comment": null
+    },
+    "duckdb": {
+     "delimiter": ";",
+     "terminator": "\n",
+     "quote": null,
+     "quote_style": null,
+     "quotes_in_unquoted_fields": null,
+     "escape": null,
+     "escape_in_unquoted_fields": null,
+     "double_quote_escape": null,
+     "comment": null
+    }
+   },
+   "dialect": {
+    "delimiter": ";",
+    "terminator": "\n",
+    "quote": null,
+    "quote_style": null,
+    "quotes_in_unquoted_fields": null,
+    "escape": null,
+    "escape_in_unquoted_fields": false,
+    "double_quote_escape": false,
+    "comment": null
+   },
+   "agreement": 3,
+   "contested": [],
+   "encoding": {
+    "class": "ascii",
+    "detected": "ascii",
+    "bom": null,
+    "wide": null,
+    "magic": null,
+    "control_frac": 0.0,
+    "chardet": "ascii"
+   },
+   "consistency": {
+    "scanned": 8257545,
+    "records": 195368,
+    "modal_fields": 7,
+    "modal_share": 1.0,
+    "quotes": 0,
+    "comments": 0
+   },
+   "why": "semicolon-separated"
+  },
+  "e4271019c484626648de1703428ba05f79129b79": {
+   "repo": "lukhi-laksh/Kaggle-Notebooks",
+   "path": "EAFC26 Player/.ipynb_checkpoints/EAFC26-checkpoint.csv",
+   "ref": "4c7a30fc07da6d99d8e1c96408f6dd98f7f391a7",
+   "lfs": false,
+   "size": 7252828,
+   "bucket": 22,
+   "windows": 1,
+   "sniffers": {
+    "custom": {
+     "delimiter": ",",
+     "terminator": "\n",
+     "quote": "\"",
+     "quote_style": "strict",
+     "quotes_in_unquoted_fields": false,
+     "escape": null,
+     "escape_in_unquoted_fields": false,
+     "double_quote_escape": true,
+     "comment": null
+    },
+    "clevercsv": {
+     "delimiter": ",",
+     "terminator": null,
+     "quote": "\"",
+     "quote_style": null,
+     "quotes_in_unquoted_fields": null,
+     "escape": null,
+     "escape_in_unquoted_fields": null,
+     "double_quote_escape": null,
+     "comment": null
+    },
+    "duckdb": {
+     "delimiter": ",",
+     "terminator": "\n",
+     "quote": "\"",
+     "quote_style": null,
+     "quotes_in_unquoted_fields": null,
+     "escape": null,
+     "escape_in_unquoted_fields": null,
+     "double_quote_escape": true,
+     "comment": null
+    }
+   },
+   "dialect": {
+    "delimiter": ",",
+    "terminator": "\n",
+    "quote": "\"",
+    "quote_style": "strict",
+    "quotes_in_unquoted_fields": false,
+    "escape": null,
+    "escape_in_unquoted_fields": false,
+    "double_quote_escape": true,
+    "comment": null
+   },
+   "agreement": 3,
+   "contested": [],
+   "encoding": {
+    "class": "utf-8",
+    "detected": "utf-8",
+    "bom": null,
+    "wide": null,
+    "magic": null,
+    "control_frac": 0.0,
+    "chardet": "utf-8"
+   },
+   "consistency": {
+    "scanned": 7252828,
+    "records": 17874,
+    "modal_fields": 59,
+    "modal_share": 1.0,
+    "quotes": 92118,
+    "comments": 0
+   },
+   "why": "quote-heavy short fields"
+  },
+  "ea098731e1835956acc88259f168a438fd040a4d": {
+   "repo": "andrewnam/systematic_human_learning",
+   "path": "data/hmm/solvers/sim_states_posterior.tsv",
+   "ref": "d8233f9fa7d17c5c7a6cf3b6ee634c34a2ac3e46",
+   "lfs": false,
+   "size": 20298964,
+   "bucket": 24,
+   "windows": 3,
+   "sniffers": {
+    "custom": {
+     "delimiter": "\t",
+     "terminator": "\n",
+     "quote": null,
+     "quote_style": null,
+     "quotes_in_unquoted_fields": null,
+     "escape": null,
+     "escape_in_unquoted_fields": false,
+     "double_quote_escape": false,
+     "comment": null
+    },
+    "clevercsv": {
+     "delimiter": "\t",
+     "terminator": null,
+     "quote": null,
+     "quote_style": null,
+     "quotes_in_unquoted_fields": null,
+     "escape": null,
+     "escape_in_unquoted_fields": null,
+     "double_quote_escape": null,
+     "comment": null
+    },
+    "duckdb": {
+     "delimiter": "\t",
+     "terminator": "\n",
+     "quote": null,
+     "quote_style": null,
+     "quotes_in_unquoted_fields": null,
+     "escape": null,
+     "escape_in_unquoted_fields": null,
+     "double_quote_escape": null,
+     "comment": null
+    }
+   },
+   "dialect": {
+    "delimiter": "\t",
+    "terminator": "\n",
+    "quote": null,
+    "quote_style": null,
+    "quotes_in_unquoted_fields": null,
+    "escape": null,
+    "escape_in_unquoted_fields": false,
+    "double_quote_escape": false,
+    "comment": null
+   },
+   "agreement": 3,
+   "contested": [],
+   "encoding": {
+    "class": "ascii",
+    "detected": "ascii",
+    "bom": null,
+    "wide": null,
+    "magic": null,
+    "control_frac": 0.0,
+    "chardet": "ascii"
+   },
+   "window_delimiters": [
+    "\t",
+    "\t",
+    "\t"
+   ],
+   "consistency": {
+    "scanned": 20298964,
+    "records": 1000001,
+    "modal_fields": 4,
+    "modal_share": 1.0,
+    "quotes": 0,
+    "comments": 0
+   },
+   "why": "tab-separated"
+  }
+ }
+}
