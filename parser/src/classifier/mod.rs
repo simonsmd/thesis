@@ -259,7 +259,7 @@ mod tests {
                             for double_quote_escape in [true, false] {
                                 for comment in [Some(b'#'), None] {
                                     configs.push(
-                                        Config::new()
+                                        Config::builder()
                                             .delimiter(b'\t')
                                             .terminator(terminator.clone())
                                             .quote(quote)
@@ -267,7 +267,9 @@ mod tests {
                                             .escape_in_unquoted_fields(escape_in_unquoted_fields)
                                             .quote_style(quote_style.clone())
                                             .double_quote_escape(double_quote_escape)
-                                            .comment(comment),
+                                            .comment(comment)
+                                            .build()
+                                            .unwrap(),
                                     );
                                 }
                             }
@@ -376,9 +378,9 @@ mod tests {
     /// quote with and without an escape.
     fn configs_with_zero() -> Vec<Config> {
         let mut configs = configs();
-        configs.push(Config::new().delimiter(0));
-        configs.push(Config::new().quote(Some(0)).escape(Some(b'\\')));
-        configs.push(Config::new().quote(Some(0)).escape(None));
+        configs.push(Config::builder().delimiter(0).build().unwrap());
+        configs.push(Config::builder().quote(Some(0)).escape(Some(b'\\')).build().unwrap());
+        configs.push(Config::builder().quote(Some(0)).escape(None).build().unwrap());
         configs
     }
 

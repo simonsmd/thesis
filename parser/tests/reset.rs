@@ -49,7 +49,7 @@ const PARTIAL: usize = 1;
 const AFTER: &[u8] = b"x,\"y\"\"z\"\n1,2";
 
 fn config() -> Config {
-    Config::new().quote_style(QuoteStyle::Strict(false)).escape(None).comment(None)
+    Config::builder().quote_style(QuoteStyle::Strict(false)).escape(None).comment(None).build().unwrap()
 }
 
 fn check<D: Dfa>() {

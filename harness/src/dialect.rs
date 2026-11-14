@@ -142,31 +142,35 @@ impl Dialect {
         }
     }
 
-    /// Check that the dialect fully determines a [`Config`].
+    /// Check that the dialect fully determines a [`Config`] and that the parser accepts it.
     pub fn validate(&self) -> Result<(), String> {
-        self.parser_quote_style().map(|_| ())
+        self.try_config().map(|_| ())
     }
 
     /// The parser config for this dialect.
     ///
+    /// Panics if the dialect is incomplete or invalid; [`Dialect::validate`] it first.
+    pub fn config(&self) -> Config {
+        self.try_config().expect("dialect was validated")
+    }
+
     /// Every field is set explicitly: falling back to [`Config::default`] would silently enable
     /// its `#` comments and `\` escapes.
-    ///
-    /// Panics if the dialect is incomplete; [`Dialect::validate`] it first.
-    pub fn config(&self) -> Config {
-        let quote_style = self.parser_quote_style().expect("dialect was validated");
-        Config::new()
+    fn try_config(&self) -> Result<Config, String> {
+        Config::builder()
             .delimiter(self.delimiter.0)
             .terminator(match self.terminator {
                 Terminator::Crlf => RecordTerminator::CRLF,
                 Terminator::Byte(b) => RecordTerminator::Byte(b.0),
             })
             .quote(self.quote.map(|b| b.0))
-            .quote_style(quote_style)
+            .quote_style(self.parser_quote_style()?)
             .escape(self.escape.map(|b| b.0))
             .escape_in_unquoted_fields(self.escape_in_unquoted_fields)
             .double_quote_escape(self.double_quote_escape)
             .comment(self.comment.map(|b| b.0))
+            .build()
+            .map_err(|e| e.to_string())
     }
 }
 
@@ -263,5 +267,11 @@ mod tests {
         assert!(dialect.validate().is_err());
         let dialect = Dialect { quote: None, quote_style: None, ..Dialect::default() };
         assert!(dialect.validate().is_ok());
+    }
+
+    #[test]
+    fn structural_bytes_must_differ() {
+        let dialect = Dialect { comment: Some(Byte(b',')), ..Dialect::default() };
+        assert_eq!(dialect.validate().unwrap_err(), "delimiter and comment are both ','");
     }
 }

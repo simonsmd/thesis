@@ -131,7 +131,7 @@ fn zero_bytes_before_structural_bytes() {
 
 #[test]
 fn zero_byte_delimiter() {
-    let config = Config::new().delimiter(0);
+    let config = Config::builder().delimiter(0).build().unwrap();
     let field = "f".repeat(20);
     let input = format!("a\0{field}\0\"q\0\"\n\0b\n");
     assert_eq!(parse(&config, input.as_bytes()), rows(&[&["a", &field, "q\0"], &["", "b"]]));
@@ -197,7 +197,7 @@ fn bare_cr_terminator() {
 #[test]
 fn custom_byte_terminator_keeps_cr() {
     // With a plain '\n' terminator, '\r' is an ordinary field byte.
-    let config = Config::new().terminator(RecordTerminator::Byte(b'\n'));
+    let config = Config::builder().terminator(RecordTerminator::Byte(b'\n')).build().unwrap();
     assert_eq!(parse(&config, b"a\r\nb\n"), rows(&[&["a\r"], &["b"]]));
 }
 
@@ -267,7 +267,7 @@ fn toggle_with_double_quote_escape() {
 fn strict_mode_rejects_inner_quote() {
     // In Strict mode a quote that isn't at field start is a parser error,
     // reported at the offending byte.
-    let config = Config::new().quote_style(QuoteStyle::Strict(false));
+    let config = Config::builder().quote_style(QuoteStyle::Strict(false)).build().unwrap();
     let err = try_parse(&config, b"a\"b\",c\n").unwrap_err();
     match err {
         Error::Parser(pos) => assert_eq!(pos.byte, 1),
@@ -278,7 +278,7 @@ fn strict_mode_rejects_inner_quote() {
 #[test]
 fn strict_mode_rejects_trailing_garbage_after_quote() {
     // After a closing quote, only a delimiter or terminator is allowed.
-    let config = Config::new().quote_style(QuoteStyle::Strict(false));
+    let config = Config::builder().quote_style(QuoteStyle::Strict(false)).build().unwrap();
     let err = try_parse(&config, b"\"ab\"c\n").unwrap_err();
     assert!(matches!(err, Error::Parser(_)));
 }
@@ -286,7 +286,7 @@ fn strict_mode_rejects_trailing_garbage_after_quote() {
 #[test]
 fn strict_mode_rejects_unclosed_quote_at_eof() {
     // An unclosed quote at EOF is a parser error
-    let config = Config::new().quote_style(QuoteStyle::Strict(false));
+    let config = Config::builder().quote_style(QuoteStyle::Strict(false)).build().unwrap();
     let err = try_parse(&config, b"\"ab").unwrap_err();
     assert!(matches!(err, Error::Parser(_)));
 }
@@ -300,7 +300,7 @@ fn unclosed_escape_in_quoted_field_at_eof() {
         QuoteStyle::Strict(false),
         QuoteStyle::Strict(true),
     ] {
-        let config = Config::new().quote_style(style.clone());
+        let config = Config::builder().quote_style(style.clone()).build().unwrap();
         let err = try_parse(&config, b"\"ab\\").unwrap_err();
         assert!(matches!(err, Error::Parser(_)), "{style:?}");
     }
@@ -314,7 +314,7 @@ fn unclosed_escape_in_unquoted_field_at_eof() {
         QuoteStyle::Strict(false),
         QuoteStyle::Strict(true),
     ] {
-        let config = Config::new().quote_style(style.clone());
+        let config = Config::builder().quote_style(style.clone()).build().unwrap();
         let err = try_parse(&config, b"a,b\\").unwrap_err();
         assert!(matches!(err, Error::Parser(_)), "{style:?}");
     }
@@ -324,7 +324,7 @@ fn unclosed_escape_in_unquoted_field_at_eof() {
 fn trailing_backslash_without_unquoted_escapes_at_eof() {
     // With escapes off in unquoted fields the backslash is an ordinary byte, so
     // ending on it is fine.
-    let config = Config::new().escape_in_unquoted_fields(false);
+    let config = Config::builder().escape_in_unquoted_fields(false).build().unwrap();
     assert_eq!(parse(&config, b"a,b\\"), rows(&[&["a", "b\\"]]));
 }
 
@@ -337,13 +337,13 @@ fn unterminated_quote_at_eof() {
 
 #[test]
 fn disabled_quoting() {
-    let config = Config::new().quote(None);
+    let config = Config::builder().quote(None).build().unwrap();
     assert_eq!(parse(&config, b"\"a\",b\n"), rows(&[&["\"a\"", "b"]]));
 }
 
 #[test]
 fn disabled_double_quote_escape() {
-    let config = Config::new().double_quote_escape(false);
+    let config = Config::builder().double_quote_escape(false).build().unwrap();
     assert_eq!(parse(&config, b"\"a\"\"b\",b\n"), rows(&[&["ab", "b"]]));
 }
 
@@ -380,7 +380,7 @@ fn escaped_backslash() {
 
 #[test]
 fn disabled_escape_keeps_backslash() {
-    let config = Config::new().escape(None);
+    let config = Config::builder().escape(None).build().unwrap();
     assert_eq!(parse(&config, b"a\\b\n"), rows(&[&["a\\b"]]));
 }
 
@@ -406,7 +406,7 @@ fn hash_is_literal_mid_field() {
 fn comment_ends_at_newline_with_a_custom_terminator() {
     // A comment is closed by a literal '\n' whatever the terminator is, so
     // '\n' stays significant even when it does not end records.
-    let config = Config::new().terminator(RecordTerminator::Byte(b';'));
+    let config = Config::builder().terminator(RecordTerminator::Byte(b';')).build().unwrap();
     assert_eq!(
         parse(&config, b"#comment\na,b;c,d;"),
         rows(&[&["a", "b"], &["c", "d"]]),
@@ -418,7 +418,7 @@ fn comment_ends_at_newline_with_a_custom_terminator() {
 #[test]
 fn strict_true_allows_literal_quote_in_unquoted_field() {
     // Strict(true): a quote that isn't at field start is an ordinary byte.
-    let config = Config::new().quote_style(QuoteStyle::Strict(true));
+    let config = Config::builder().quote_style(QuoteStyle::Strict(true)).build().unwrap();
     assert_eq!(parse(&config, b"a\"b,c\n"), rows(&[&["a\"b", "c"]]));
 }
 
@@ -426,7 +426,7 @@ fn strict_true_allows_literal_quote_in_unquoted_field() {
 fn strict_true_still_treats_leading_quote_as_quoting() {
     // The flag only affects mid-field quotes; a field that opens with a
     // quote is still a quoted field.
-    let config = Config::new().quote_style(QuoteStyle::Strict(true));
+    let config = Config::builder().quote_style(QuoteStyle::Strict(true)).build().unwrap();
     assert_eq!(parse(&config, b"\"a,b\",c\n"), rows(&[&["a,b", "c"]]));
     // also after a delimiter, where the quote is not structural inside an unquoted field. Repeated
     // to fill whole vectors: the skipping variants run the last partial vector byte by byte
@@ -438,7 +438,7 @@ fn strict_true_still_treats_leading_quote_as_quoting() {
 fn strict_true_still_rejects_garbage_after_close() {
     // The flag does not relax the post-close rule: after a *closing* quote
     // only a delimiter or terminator is allowed.
-    let config = Config::new().quote_style(QuoteStyle::Strict(true));
+    let config = Config::builder().quote_style(QuoteStyle::Strict(true)).build().unwrap();
     let err = try_parse(&config, b"\"ab\"c\n").unwrap_err();
     assert!(matches!(err, Error::Parser(_)));
 }
@@ -448,7 +448,7 @@ fn strict_true_still_rejects_garbage_after_close() {
 #[test]
 fn escape_disabled_in_unquoted_fields() {
     // With escapes off in unquoted fields, a backslash there is literal...
-    let config = Config::new().escape_in_unquoted_fields(false);
+    let config = Config::builder().escape_in_unquoted_fields(false).build().unwrap();
     assert_eq!(parse(&config, b"a\\b\n"), rows(&[&["a\\b"]]));
     // ...but escapes still apply inside quoted fields.
     assert_eq!(parse(&config, b"\"a\\\"b\"\n"), rows(&[&["a\"b"]]));
@@ -459,7 +459,7 @@ fn escape_disabled_in_unquoted_fields() {
 #[test]
 fn parser_error_reports_record_and_field() {
     // Error in the 2nd record (index 1), 2nd field (index 1).
-    let config = Config::new().quote_style(QuoteStyle::Strict(false));
+    let config = Config::builder().quote_style(QuoteStyle::Strict(false)).build().unwrap();
     let err = try_parse(&config, b"a,b,c\nd,e\"f\n").unwrap_err();
     match err {
         Error::Parser(pos) => {
@@ -472,7 +472,7 @@ fn parser_error_reports_record_and_field() {
 
 #[test]
 fn parser_error_byte_offset_across_records() {
-    let config = Config::new().quote_style(QuoteStyle::Strict(false));
+    let config = Config::builder().quote_style(QuoteStyle::Strict(false)).build().unwrap();
     let err = try_parse(&config, b"a,b,c\nd,e\"f\n").unwrap_err();
     match err {
         // The offending quote is at absolute byte 9, not 3.
@@ -485,7 +485,7 @@ fn parser_error_byte_offset_across_records() {
 fn parser_error_is_sticky() {
     // The input after an error is not a record start, so reading on reports the
     // same error again instead of resuming in the middle of the broken record.
-    let config = Config::new().quote_style(QuoteStyle::Strict(false));
+    let config = Config::builder().quote_style(QuoteStyle::Strict(false)).build().unwrap();
     let (first, second) = read_after_error(&config, b"a,b\nc\"d,e\nf,g\n");
     assert!(first.starts_with("Err(Parser("), "{first}");
     assert_eq!(first, second);
@@ -495,6 +495,6 @@ fn parser_error_is_sticky() {
 
 #[test]
 fn custom_delimiter_and_quote() {
-    let config = Config::new().delimiter(b'\t').quote(Some(b'\''));
+    let config = Config::builder().delimiter(b'\t').quote(Some(b'\'')).build().unwrap();
     assert_eq!(parse(&config, b"'a\tb'\tc\n"), rows(&[&["a\tb", "c"]]));
 }

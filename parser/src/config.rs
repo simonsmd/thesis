@@ -1,15 +1,18 @@
 /// Dialect settings shared by every [`Dfa`](crate::dfa::Dfa).
 ///
-/// Build one by chaining onto [`Config::new`]:
+/// [`Config::new`] is the default dialect. Any other is built with [`Config::builder`], which
+/// checks the settings, so a `Config` is always valid:
 ///
 /// ```
 /// use csv_parser::config::{Config, QuoteStyle};
 ///
-/// let config = Config::new()
+/// let config = Config::builder()
 ///     .delimiter(b';')
 ///     .quote(Some(b'\''))
 ///     .quote_style(QuoteStyle::Strict(false))
-///     .comment(None);
+///     .comment(None)
+///     .build()
+///     .unwrap();
 /// ```
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -48,6 +51,29 @@ pub enum QuoteStyle {
     Toggle, // Concat, Always?
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigError {
+    /// A structural byte is not ASCII.
+    NotAscii { setting: &'static str, byte: u8 },
+    /// Two settings use the same byte.
+    Conflict { first: &'static str, second: &'static str, byte: u8 },
+}
+
+impl std::fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotAscii { setting, byte } => {
+                write!(f, "{setting} must be an ASCII byte, got 0x{byte:02x}")
+            }
+            Self::Conflict { first, second, byte } => {
+                write!(f, "{first} and {second} are both '{}'", byte.escape_ascii())
+            }
+        }
+    }
+}
+
+impl std::error::Error for ConfigError {}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -59,62 +85,144 @@ impl Default for Config {
             escape_in_unquoted_fields: true,
             double_quote_escape: true,
             comment: Some(b'#'),
-            // ignore_emtpy_lines: true,
         }
     }
 }
 
 impl Config {
-    /// The default dialect, as a starting point for the builder methods below.
+    /// The default dialect.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// A builder starting from the default dialect.
+    pub fn builder() -> ConfigBuilder {
+        ConfigBuilder { config: Self::default() }
+    }
+}
+
+/// Collects the settings of a [`Config`] and checks them in [`ConfigBuilder::build`].
+#[derive(Debug, Clone)]
+pub struct ConfigBuilder {
+    config: Config,
+}
+
+impl ConfigBuilder {
     /// The byte separating fields within a record.
     pub fn delimiter(mut self, delimiter: u8) -> Self {
-        self.delimiter = delimiter;
+        self.config.delimiter = delimiter;
         self
     }
 
     /// What ends a record: either `\r`/`\n` in any combination, or one byte.
     pub fn terminator(mut self, terminator: RecordTerminator) -> Self {
-        self.terminator = terminator;
+        self.config.terminator = terminator;
         self
     }
 
     /// The quote byte, or `None` to treat quotes as ordinary field bytes.
     pub fn quote(mut self, quote: Option<u8>) -> Self {
-        self.quote = quote;
+        self.config.quote = quote;
         self
     }
 
     /// Where a quote is allowed to open a quoted region.
     pub fn quote_style(mut self, quote_style: QuoteStyle) -> Self {
-        self.quote_style = quote_style;
+        self.config.quote_style = quote_style;
         self
     }
 
     /// The escape byte, or `None` to treat it as an ordinary field byte.
     pub fn escape(mut self, escape: Option<u8>) -> Self {
-        self.escape = escape;
+        self.config.escape = escape;
         self
     }
 
-    /// Whether [`Config::escape`] also applies outside quoted fields.
+    /// Whether [`ConfigBuilder::escape`] also applies outside quoted fields.
     pub fn escape_in_unquoted_fields(mut self, enabled: bool) -> Self {
-        self.escape_in_unquoted_fields = enabled;
+        self.config.escape_in_unquoted_fields = enabled;
         self
     }
 
     /// Whether a doubled quote inside a quoted field is a literal quote.
     pub fn double_quote_escape(mut self, enabled: bool) -> Self {
-        self.double_quote_escape = enabled;
+        self.config.double_quote_escape = enabled;
         self
     }
 
     /// The byte that starts a comment line, or `None` to disable comments.
     pub fn comment(mut self, comment: Option<u8>) -> Self {
-        self.comment = comment;
+        self.config.comment = comment;
         self
+    }
+
+    /// Build and validate the parser configuration
+    pub fn build(self) -> Result<Config, ConfigError> {
+        let config = self.config;
+        let (terminator, second_terminator) = match config.terminator {
+            RecordTerminator::CRLF => (b'\r', Some(b'\n')),
+            RecordTerminator::Byte(b) => (b, None),
+        };
+        let bytes = [
+            ("delimiter", Some(config.delimiter)),
+            ("terminator", Some(terminator)),
+            ("terminator", second_terminator),
+            ("quote", config.quote),
+            ("escape", config.escape),
+            ("comment", config.comment),
+        ];
+        let bytes = bytes.iter().filter_map(|(setting, byte)| byte.map(|b| (*setting, b)));
+
+        for (i, (setting, byte)) in bytes.clone().enumerate() {
+            if !byte.is_ascii() {
+                return Err(ConfigError::NotAscii { setting, byte });
+            }
+            if let Some((first, _)) = bytes.clone().take(i).find(|(_, earlier)| *earlier == byte) {
+                return Err(ConfigError::Conflict { first, second: setting, byte });
+            }
+        }
+        Ok(config)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_the_default() {
+        assert_eq!(Config::builder().build().map(|_| ()), Ok(()));
+        assert_eq!(Config::builder().delimiter(0).quote(None).escape(None).comment(None).build().map(|_| ()), Ok(()));
+    }
+
+    #[test]
+    fn rejects_non_ascii_bytes() {
+        assert_eq!(
+            Config::builder().delimiter(0xa7).build().map(|_| ()),
+            Err(ConfigError::NotAscii { setting: "delimiter", byte: 0xa7 }),
+        );
+        assert_eq!(
+            Config::builder().terminator(RecordTerminator::Byte(0x80)).build().map(|_| ()),
+            Err(ConfigError::NotAscii { setting: "terminator", byte: 0x80 }),
+        );
+        assert!(Config::builder().quote(Some(0xff)).build().is_err());
+        assert!(Config::builder().escape(Some(0xff)).build().is_err());
+        assert!(Config::builder().comment(Some(0xff)).build().is_err());
+    }
+
+    #[test]
+    fn rejects_conflicting_bytes() {
+        assert_eq!(
+            Config::builder().delimiter(b'"').build().map(|_| ()),
+            Err(ConfigError::Conflict { first: "delimiter", second: "quote", byte: b'"' }),
+        );
+        assert_eq!(
+            Config::builder().comment(Some(b'\n')).build().map(|_| ()),
+            Err(ConfigError::Conflict { first: "terminator", second: "comment", byte: b'\n' }),
+        );
+        assert!(Config::builder().escape(Some(b'"')).build().is_err());
+        assert!(Config::builder().terminator(RecordTerminator::Byte(b',')).build().is_err());
+        // a disabled setting cannot conflict
+        assert_eq!(Config::builder().delimiter(b'#').comment(None).build().map(|_| ()), Ok(()));
     }
 }
