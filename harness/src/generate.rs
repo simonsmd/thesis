@@ -54,8 +54,8 @@ impl Case {
     /// where it is expected to agree:
     ///
     /// - the reference parses without an error, since rust-csv never reports one
-    /// - the dialect has no comments: a comment line ends at `\n` in the reference but at the
-    ///   record terminator in rust-csv, and an unterminated comment line at the end of the input
+    /// - the dialect has no comments: a comment line ends at the record terminator in the
+    ///   reference but always at `\n` in rust-csv, and an unterminated comment line at the end of the input
     ///   is an extra empty record in rust-csv
     pub fn check(&self, reference: &Parser, parsers: &[Parser]) -> Result<(), String> {
         let report = check::check(reference, parsers, &self.dialect, &self.data, &[self.options]);

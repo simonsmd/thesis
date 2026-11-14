@@ -94,7 +94,7 @@ pub fn transition(config: &Config, state: State, input: u8) -> (State, Transitio
             }
         }
         InComment => {
-            if input == b'\n' {
+            if config.terminator.equals(input) {
                 (StartRecord, Discard)
             } else {
                 (InComment, Discard)

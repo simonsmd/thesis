@@ -403,12 +403,12 @@ fn hash_is_literal_mid_field() {
 }
 
 #[test]
-fn comment_ends_at_newline_with_a_custom_terminator() {
-    // A comment is closed by a literal '\n' whatever the terminator is, so
-    // '\n' stays significant even when it does not end records.
+fn comment_ends_at_a_custom_terminator() {
+    // A comment is closed by the record terminator, so '\n' is part of the
+    // comment when it does not end records.
     let config = Config::builder().terminator(RecordTerminator::Byte(b';')).build().unwrap();
     assert_eq!(
-        parse(&config, b"#comment\na,b;c,d;"),
+        parse(&config, b"#comment\nstill comment;a,b;c,d;"),
         rows(&[&["a", "b"], &["c", "d"]]),
     );
 }

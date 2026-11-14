@@ -35,8 +35,7 @@ pub fn is_field_emit(state: usize) -> bool {
 
 impl ClassDfa {
     // each equivalence class besides the non structural bytes has only one byte per class
-    // TODO: does it make sense to have \r and \n in the same class in CRLF mode (if comments are
-    // disabled)
+    // TODO: does it make sense to have \r and \n in the same class in CRLF mode
     fn add_equivalence_class(&mut self, b: u8) {
         // class indices start 1 since the default class for all non structural bytes is 0
         self.class_index += 1;
@@ -69,9 +68,6 @@ impl ClassDfa {
 
         if let Some(b) = config.comment {
             self.add_equivalence_class(b);
-            if let RecordTerminator::Byte(b) = config.terminator && b != b'\n' {
-                self.add_equivalence_class(b'\n');
-            }
         }
     }
     
