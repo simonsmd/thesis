@@ -483,7 +483,7 @@ def run(
             "seed": seed, "count": n, "max_bucket": max_bucket,
             "min_size": min_size, "max_size": max_size,
             "source": source,
-            "index_watermark": index.heads_watermark(),
+            "index_watermark": index.heads_watermark(source),
         }
         stats["definition"] = str(dataset_mod.build(
             dataset, kept_rows, provenance, procs=sniff_procs, on_event=emit,

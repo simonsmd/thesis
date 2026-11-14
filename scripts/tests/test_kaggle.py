@@ -917,6 +917,8 @@ class IndexBuild(unittest.TestCase):
         self.assertTrue(row["fetched"])
         self.assertEqual(row["delimiter"], ",")
         self.assertEqual(row["via"], "kaggle")
+        # The Kaggle index records its own watermark, not the GitHub one.
+        self.assertEqual(index.heads_watermark("kaggle"), "00000:00000000")
 
     def test_identical_content_in_two_datasets_collapses_to_one_row(self):
         """Republication is the Kaggle pool's defining property -- iris and

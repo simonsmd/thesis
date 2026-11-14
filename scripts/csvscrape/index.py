@@ -274,12 +274,24 @@ def _dedup(frame: pl.LazyFrame) -> pl.LazyFrame:
     )
 
 
-def heads_watermark() -> str | None:
-    """Highest heads rec_id already folded into the index, if any."""
+def heads_watermark(source: str = "github") -> str | None:
+    """Highest heads rec_id already folded into the source's index, if any."""
+    path = WATERMARK_PATH if source == "github" else _kaggle_watermark_path()
     try:
-        return WATERMARK_PATH.read_text().strip() or None
+        return path.read_text().strip() or None
     except OSError:
         return None
+
+
+def _highest_rec_id(log_name: str) -> str | None:
+    """The highest rec_id in the sealed shards of a log."""
+    parts = log.sealed(log_name)
+    if not parts:
+        return None
+    heads = pl.scan_ndjson(parts)
+    if "rec_id" not in heads.collect_schema().names():
+        return None
+    return heads.select(pl.col("rec_id").max()).collect().item()
 
 
 def _metadata_rows() -> tuple[pl.LazyFrame | None, str | None]:
@@ -295,14 +307,9 @@ def _metadata_rows() -> tuple[pl.LazyFrame | None, str | None]:
     """
     from . import probe
 
-    parts = log.sealed(probe.HEADS_LOG)
-    if not parts:
+    if not log.sealed(probe.HEADS_LOG):
         return None, None
-    frame = probe.metadata_rows()
-    heads = pl.scan_ndjson(parts)
-    high = (heads.select(pl.col("rec_id").max()).collect().item()
-            if "rec_id" in heads.collect_schema().names() else None)
-    return frame, high
+    return probe.metadata_rows(), _highest_rec_id(probe.HEADS_LOG)
 
 
 def _stage_meta(rows: pl.LazyFrame, path: Path) -> None:
@@ -825,6 +832,15 @@ KAGGLE_INDEX = config.DATA_ROOT / "index" / "kaggle_files.parquet"
 KAGGLE_DATASETS = config.DATA_ROOT / "index" / "kaggle_datasets.parquet"
 
 
+def _kaggle_watermark_path() -> Path:
+    """Highest Kaggle heads rec_id folded into `KAGGLE_INDEX`, kept beside it.
+
+    Only a record of what the index was built from: unlike the GitHub one,
+    nothing decides what to probe by it.
+    """
+    return KAGGLE_INDEX.parent / "kaggle_heads_watermark.txt"
+
+
 def _kaggle_bundles() -> pl.LazyFrame:
     from . import kaggle
 
@@ -959,6 +975,8 @@ def build_kaggle(out: Path | None = None) -> Path:
         collapsed = collapsed.join(probe.dedupe(rows), on="content_key",
                                    how="left", maintain_order="left")
     collapsed.sink_parquet(out)
+    out.with_name(_kaggle_watermark_path().name).write_text(
+        _highest_rec_id(kaggle.HEADS_LOG) or "")
 
     # Dataset-level roll-up, so `kaggle-status` can report coverage without
     # re-reading the bundle log -- the same role `REPOS_PATH` plays for GitHub.
