@@ -241,6 +241,42 @@ def _cmd_download(args) -> int:
     return 0
 
 
+def _cmd_fetch(args) -> int:
+    import json
+
+    from . import dataset, download
+    from .index import human
+
+    path = dataset.manifest_path(args.dataset)
+    if not path.exists():
+        print(f"no dataset definition at {path}")
+        return 1
+    source = json.loads(path.read_text(encoding="utf-8"))["dataset"].get("source", "github")
+    if source == "kaggle":
+        from .kaggle import Kaggle
+
+        client = Kaggle(on_event=lambda *a, **k: None)
+    else:
+        client = _github(None)
+
+    done = 0
+
+    def on_file(rec: dict) -> None:
+        nonlocal done
+        done += 1
+        if rec["state"] != "ok":
+            print(f"  failed  {rec['content_key'][:10]}  {rec.get('reason')}  "
+                  f"{rec['full_name']}/{rec['path']}")
+        elif done % 100 == 0:
+            print(f"  {done:,} files done")
+
+    stats = download.fetch(client, args.dataset, workers=args.workers, on_file=on_file)
+    failed = len(stats["failed"])
+    print(f"{args.dataset}: {stats['files']:,} files · {stats['reused']:,} already in the store · "
+          f"{stats['fetched']:,} fetched ({human(stats['bytes'])}) · {failed:,} failed")
+    return 1 if failed else 0
+
+
 def _cmd_drop(args) -> int:
     from . import download
 
@@ -488,6 +524,15 @@ def build_parser() -> argparse.ArgumentParser:
                    help="draw only files of at most this many bytes. Unlike "
                         "--max-bucket it may cut an octave part-way; both "
                         "apply if given")
+
+    p = sub.add_parser("fetch",
+                       help="download the files of an existing dataset definition")
+    p.set_defaults(run=_cmd_fetch)
+    p.add_argument("--dataset", required=True,
+                   help="name of a definition in datasets/. Files already in "
+                        "the store are checked and kept; a file that cannot "
+                        "be fetched is reported and not replaced")
+    p.add_argument("--workers", type=int, default=8)
 
     p = sub.add_parser("drop", help="remove files from a dataset by hand")
     p.set_defaults(run=_cmd_drop)

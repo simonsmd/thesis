@@ -5103,3 +5103,49 @@ class SizeFlags(unittest.TestCase):
         self.assertIsNone(args.min_size)
         self.assertEqual(args.max_size, 1 << 20)
 
+
+
+class FetchFromADefinition(unittest.TestCase):
+    """`fetch` rebuilds the files of a dataset from `datasets/<name>.json`."""
+
+    def test_missing_files_are_fetched_and_lost_ones_reported(self):
+        import hashlib
+
+        from csvscrape import config, dataset, download
+        from csvscrape.validate import git_blob_sha1
+
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        for module, name in [(config, "DATA_ROOT"), (download, "CORPUS"), (dataset, "ROOT")]:
+            self.addCleanup(setattr, module, name, getattr(module, name))
+        config.DATA_ROOT = root
+        download.CORPUS = root / "corpus"
+        dataset.ROOT = root / "datasets"
+        dataset.ROOT.mkdir()
+
+        here = b"a,b\n1,2\n" * 20
+        gone = b"x;y\n3;4\n" * 20
+        key = {data: git_blob_sha1(len(data), iter([data])) for data in (here, gone)}
+        entry = {"repo": "o/r", "ref": "e" * 40, "lfs": False, "bucket": 7}
+        (dataset.ROOT / "tiny.json").write_text(json.dumps({
+            "dataset": {"name": "tiny", "source": "github"},
+            "files": {
+                key[here]: entry | {"path": "here.csv", "size": len(here)},
+                key[gone]: entry | {"path": "gone.csv", "size": len(gone)},
+            },
+        }))
+
+        class GH:
+            def stream(self, url, sink, chunk=1 << 20):
+                if url.endswith("gone.csv"):
+                    return None
+                sink.write(here)
+                return len(here), hashlib.sha256(here).hexdigest()
+
+        first = download.fetch(GH(), "tiny", workers=1)
+        self.assertEqual((first["fetched"], first["reused"]), (1, 0))
+        self.assertEqual([rec["content_key"] for rec in first["failed"]], [key[gone]])
+        self.assertEqual(download._target(key[here]).read_bytes(), here)
+
+        again = download.fetch(GH(), "tiny", workers=1)
+        self.assertEqual((again["fetched"], again["reused"]), (0, 1))

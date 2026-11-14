@@ -39,6 +39,9 @@ MANIFESTS = CORPUS / "manifests"
 # The dataset a plain `download` builds: the minimally-filtered pool, drawn
 # log-uniformly over size, which is the benchmarking corpus.
 DEFAULT_DATASET = "bench"
+# What locates a Kaggle file inside its dataset's zip archive, see
+# `kaggle.member_of`.
+ARCHIVE_FIELDS = ("method", "crc", "csize", "header_offset")
 
 
 def log_name(dataset: str) -> str:
@@ -179,6 +182,9 @@ def _kaggle_fetch_one(kg: Any, row: dict[str, Any],
         "size": row["size"], "ref": row.get("ref"),
         "version": row.get("version"), "is_lfs": False,
         "source": "kaggle", "ts": int(time.time()),
+        # Where the file sits in its dataset's archive, so that `fetch` can
+        # get it again from the dataset definition alone.
+        **{name: row[name] for name in ARCHIVE_FIELDS},
     }
 
     if _already_here(dest, row, "kaggle"):
@@ -484,6 +490,61 @@ def run(
             review=review,
             **({"which": sniffers_which} if sniffers_which else {})))
         stats["review"] = str(dataset_mod.review_path(dataset))
+    return stats
+
+
+def fetch(client: Any, dataset: str, workers: int = 8,
+          on_file: Any = None) -> dict[str, Any]:
+    """Get the files of an existing dataset definition into the store.
+
+    This is how a dataset is rebuilt on another machine from
+    `datasets/<name>.json` alone: no index, no sampling. A file that is
+    already in the store is checked against its content hash and kept. A file
+    that can no longer be fetched is reported and not replaced by another one,
+    so the result is either the same dataset or a list of what is missing.
+
+    `on_file(record)` is called after every file.
+    """
+    import json
+    from concurrent.futures import ThreadPoolExecutor
+
+    from . import dataset as dataset_mod
+
+    definition = json.loads(
+        dataset_mod.manifest_path(dataset).read_text(encoding="utf-8"))
+    source = definition["dataset"].get("source", "github")
+    CORPUS.mkdir(parents=True, exist_ok=True)
+
+    def one(item: tuple[str, dict[str, Any]]) -> dict[str, Any]:
+        key, entry = item
+        row = {
+            "content_key": key, "repo_id": None, "full_name": entry["repo"],
+            "path": entry["path"], "size": entry["size"],
+            "bucket": entry["bucket"], "ref": entry.get("ref"),
+            "is_lfs": bool(entry.get("lfs")),
+        }
+        if source == "kaggle":
+            archive = entry.get("archive")
+            if not archive:
+                return row | {"state": "rejected",
+                              "reason": "no_archive_position_in_definition"}
+            row |= archive
+        return fetch_one(client, row, None, source)
+
+    stats: dict[str, Any] = {"dataset": dataset, "source": source,
+                             "files": len(definition["files"]), "reused": 0,
+                             "fetched": 0, "bytes": 0, "failed": []}
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for rec in pool.map(one, definition["files"].items()):
+            if rec["state"] != "ok":
+                stats["failed"].append(rec)
+            elif rec.get("reused"):
+                stats["reused"] += 1
+            else:
+                stats["fetched"] += 1
+                stats["bytes"] += rec["bytes"]
+            if on_file:
+                on_file(rec)
     return stats
 
 

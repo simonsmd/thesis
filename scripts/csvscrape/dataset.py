@@ -238,6 +238,13 @@ def build(name: str, members: list[dict[str, Any]], provenance: dict[str, Any],
             "repo": rec["full_name"], "path": rec["path"], "ref": rec.get("ref"),
             "lfs": bool(rec["is_lfs"]), "size": rec["size"], "bucket": rec["bucket"],
         }
+        # A Kaggle file is read out of its dataset's zip archive. Its position
+        # there is kept so that `csvscrape fetch` can get the file again.
+        if "header_offset" in rec:
+            from .download import ARCHIVE_FIELDS
+
+            entry["archive"] = {"version": rec.get("version")} | {
+                name: rec[name] for name in ARCHIVE_FIELDS}
         entry.update(results.get(key, {"missing": True}))
         files[key] = entry
 
