@@ -24,34 +24,124 @@ pub fn build() -> Build {
     }
 }
 
+/// The machine a result was measured on. A value that cannot be read is `null`.
 #[derive(Debug, Clone, Serialize)]
 pub struct System {
     pub hostname: Option<String>,
+    /// The name of the installed system, e.g. `Ubuntu 24.04.1 LTS`.
+    pub os: Option<String>,
     pub kernel: Option<String>,
+    /// The options the kernel was started with. Shows settings such as `isolcpus` or
+    /// `mitigations=off`.
+    pub kernel_cmdline: Option<String>,
     pub cpu_model: Option<String>,
+    /// CPU family, model and stepping numbers, e.g. `25/97/2`. Identifies the CPU more exactly
+    /// than its name.
+    pub cpu_family_model_stepping: Option<String>,
+    pub microcode: Option<String>,
+    /// Running inside a virtual machine.
+    pub virtual_machine: Option<bool>,
+    /// The caches of the pinned CPU (or CPU 0).
+    pub caches: Vec<Cache>,
+    pub memory_kb: Option<u64>,
+    /// Whether any core runs two threads (hyperthreading).
+    pub smt_active: Option<bool>,
+    /// The CPUs that are online and share a core with the pinned CPU, itself included. Just the
+    /// pinned CPU if its sibling is turned off.
+    pub core_siblings: Option<String>,
     /// Frequency governor of the pinned CPU (or CPU 0).
     pub governor: Option<String>,
+    /// The driver behind the governor, e.g. `intel_pstate` or `amd-pstate-epp`.
+    pub scaling_driver: Option<String>,
+    pub energy_performance_preference: Option<String>,
+    pub max_frequency_khz: Option<u64>,
     /// `intel_pstate/no_turbo` or the inverse of `cpufreq/boost`.
     pub turbo: Option<bool>,
+    /// `always`, `madvise` or `never`.
+    pub transparent_hugepages: Option<String>,
     pub perf_event_paranoid: Option<i32>,
+    /// Load average of the last minute when the run started. Near 0 on an idle machine.
+    pub load_at_start: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Cache {
+    pub level: Option<u32>,
+    /// `Data`, `Instruction` or `Unified`.
+    pub kind: Option<String>,
+    /// As the kernel prints it, e.g. `48K`.
+    pub size: Option<String>,
+    /// The CPUs that share this cache.
+    pub shared_by: Option<String>,
+}
+
+fn read(path: &str) -> Option<String> {
+    fs::read_to_string(path).ok().map(|s| s.trim().to_owned())
+}
+
+/// The value of the first `name : value` line in `/proc/cpuinfo`.
+fn cpuinfo_field(info: &str, name: &str) -> Option<String> {
+    info.lines().find_map(|line| {
+        let value = line.strip_prefix(name)?.trim_start().strip_prefix(':')?;
+        Some(value.trim().to_owned())
+    })
 }
 
 pub fn system(cpu: Option<usize>) -> System {
-    let read = |path: &str| fs::read_to_string(path).ok().map(|s| s.trim().to_owned());
     let cpu = cpu.unwrap_or(0);
+    let cpu_dir = format!("/sys/devices/system/cpu/cpu{cpu}");
+    let cpuinfo = read("/proc/cpuinfo").unwrap_or_default();
+    let field = |name: &str| cpuinfo_field(&cpuinfo, name);
+
     let turbo = read("/sys/devices/system/cpu/intel_pstate/no_turbo")
         .map(|v| v == "0")
         .or_else(|| read("/sys/devices/system/cpu/cpufreq/boost").map(|v| v == "1"));
+    let family_model_stepping = match (field("cpu family"), field("model"), field("stepping")) {
+        (Some(family), Some(model), Some(stepping)) => Some(format!("{family}/{model}/{stepping}")),
+        _ => None,
+    };
+    let caches = (0..)
+        .map(|index| format!("{cpu_dir}/cache/index{index}"))
+        .take_while(|dir| fs::metadata(dir).is_ok())
+        .map(|dir| Cache {
+            level: read(&format!("{dir}/level")).and_then(|v| v.parse().ok()),
+            kind: read(&format!("{dir}/type")),
+            size: read(&format!("{dir}/size")),
+            shared_by: read(&format!("{dir}/shared_cpu_list")),
+        })
+        .collect();
+
     System {
         hostname: read("/proc/sys/kernel/hostname"),
-        kernel: read("/proc/sys/kernel/osrelease"),
-        cpu_model: read("/proc/cpuinfo").and_then(|info| {
-            info.lines()
-                .find_map(|l| l.strip_prefix("model name")?.split_once(':').map(|(_, v)| v.trim().to_owned()))
+        os: read("/etc/os-release").and_then(|text| {
+            let name = text.lines().find_map(|line| line.strip_prefix("PRETTY_NAME="))?;
+            Some(name.trim_matches('"').to_owned())
         }),
-        governor: read(&format!("/sys/devices/system/cpu/cpu{cpu}/cpufreq/scaling_governor")),
+        kernel: read("/proc/sys/kernel/osrelease"),
+        kernel_cmdline: read("/proc/cmdline"),
+        cpu_model: field("model name"),
+        cpu_family_model_stepping: family_model_stepping,
+        microcode: field("microcode"),
+        virtual_machine: field("flags").map(|flags| flags.split(' ').any(|flag| flag == "hypervisor")),
+        caches,
+        memory_kb: read("/proc/meminfo").and_then(|text| {
+            let total = text.lines().find_map(|line| line.strip_prefix("MemTotal:"))?;
+            total.trim().trim_end_matches("kB").trim().parse().ok()
+        }),
+        smt_active: read("/sys/devices/system/cpu/smt/active").map(|v| v == "1"),
+        core_siblings: read(&format!("{cpu_dir}/topology/thread_siblings_list")),
+        governor: read(&format!("{cpu_dir}/cpufreq/scaling_governor")),
+        scaling_driver: read(&format!("{cpu_dir}/cpufreq/scaling_driver")),
+        energy_performance_preference: read(&format!("{cpu_dir}/cpufreq/energy_performance_preference")),
+        max_frequency_khz: read(&format!("{cpu_dir}/cpufreq/cpuinfo_max_freq")).and_then(|v| v.parse().ok()),
         turbo,
+        // the file lists all choices with the active one in brackets: `always [madvise] never`
+        transparent_hugepages: read("/sys/kernel/mm/transparent_hugepage/enabled").and_then(|text| {
+            let (_, rest) = text.split_once('[')?;
+            Some(rest.split_once(']')?.0.to_owned())
+        }),
         perf_event_paranoid: read("/proc/sys/kernel/perf_event_paranoid").and_then(|v| v.parse().ok()),
+        load_at_start: read("/proc/loadavg").and_then(|text| text.split(' ').next()?.parse().ok()),
     }
 }
 
