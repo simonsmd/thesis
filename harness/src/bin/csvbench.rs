@@ -57,7 +57,7 @@ enum Command {
 
 #[derive(clap::Args)]
 struct ParserArgs {
-    /// Parsers to include, as globs like `compaction/simd*/*/table` (repeatable, default all).
+    /// Parsers to include, as globs like `compaction/simd*/*/bitshift` (repeatable, default all).
     #[arg(long, short)]
     parser: Vec<String>,
     /// Parsers to leave out, as globs (repeatable).

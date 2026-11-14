@@ -1,7 +1,7 @@
 //! Every parser the harness can run, under one name each.
 //!
 //! Names are `<record construction>/<read_record variant>/<skip>/<dfa>` for this crate's parsers,
-//! with `-` where an axis does not apply, e.g. `compaction/simd/nibble-map-32-state/table`. The
+//! with `-` where an axis does not apply, e.g. `compaction/simd/nibble-map-32-state/bitshift`. The
 //! skip is the classifier, its vector width and whether it looks for the structural bytes of each
 //! state or the shared ones. The rust-csv parsers are `csv-core/dfa` and `csv/byte-record`.
 //! Select them with globs.
@@ -305,39 +305,46 @@ macro_rules! classifiers {
     }};
 }
 
-/// Every parser and `read_record` variant for one DFA.
-macro_rules! for_dfa {
+/// The `read_record` variants without simd for one DFA.
+macro_rules! scalar {
     ($dfa:ty, $name:literal) => {
         [
             entry!(concat!("compaction/plain/-/", $name), compaction_plain, compaction_plain_records, <$dfa>),
             entry!(concat!("compaction/branchless/-/", $name), compaction_branchless,
                 compaction_branchless_records, <$dfa>),
-        ]
-        .into_iter()
-        .chain(classifiers!("compaction/simd", compaction_simd, compaction_simd_records, $dfa, $name))
-        .chain(classifiers!("compaction/simd-check", compaction_simd_check, compaction_simd_check_records, $dfa, $name))
-        .chain(classifiers!("zerocopy/simd", zerocopy_simd, zerocopy_simd_records, $dfa, $name))
-        .chain([
             entry!(concat!("zerocopy/plain/-/", $name), zerocopy_plain, zerocopy_plain_records, <$dfa>),
-        ])
-        .collect::<Vec<_>>()
+        ]
+    };
+}
+
+/// The skipping `read_record` variants for one DFA.
+macro_rules! simd {
+    ($dfa:ty, $name:literal) => {
+        classifiers!("compaction/simd", compaction_simd, compaction_simd_records, $dfa, $name)
+            .into_iter()
+            .chain(classifiers!("compaction/simd-check", compaction_simd_check, compaction_simd_check_records, $dfa, $name))
+            .chain(classifiers!("zerocopy/simd", zerocopy_simd, zerocopy_simd_records, $dfa, $name))
     };
 }
 
 /// All parsers, [`REFERENCE`] first.
 ///
-/// A new DFA is one more `for_dfa!` line; a new `read_record` variant is a `variant!` plus its
-/// entries in `for_dfa!`.
+/// The variants without simd exist for every DFA. The simd variants only exist for the fastest
+/// DFA, bitshift: every further DFA would add all classifiers again and take long to compile.
+///
+/// A new DFA is one more `scalar!` line; a new `read_record` variant is a `variant!` plus its
+/// entries in `scalar!` or `simd!`.
 pub fn all() -> Vec<Parser> {
     let mut parsers: Vec<Parser> = [
-        for_dfa!(ReferenceDfa, "reference"),
-        for_dfa!(BitshiftDfa, "bitshift"),
-        for_dfa!(TableDfa, "table"),
-        for_dfa!(ClassDfa, "class"),
+        scalar!(ReferenceDfa, "reference"),
+        scalar!(BitshiftDfa, "bitshift"),
+        scalar!(TableDfa, "table"),
+        scalar!(ClassDfa, "class"),
     ]
     .into_iter()
     .flatten()
     .collect();
+    parsers.extend(simd!(BitshiftDfa, "bitshift"));
     parsers.extend(rust_csv::parsers());
     debug_assert_eq!(parsers[0].name, REFERENCE);
     parsers
