@@ -1,5 +1,6 @@
 use crate::{
-    config::{Config, QuoteStyle}, dfa::Dfa,
+    config::{Config, QuoteStyle},
+    dfa::Dfa,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,11 +162,17 @@ impl Dfa for ReferenceDfa {
 
     #[inline(always)]
     fn in_quoted_field(&self, (state, _): Self::State) -> bool {
-        matches!(state, State::InQuotedFieldOutput | State::InQuotedFieldDiscard)
+        matches!(
+            state,
+            State::InQuotedFieldOutput | State::InQuotedFieldDiscard
+        )
     }
 
     #[inline(always)]
     fn in_escape_sequence(&self, (state, _): Self::State) -> bool {
-        matches!(state, State::EscapeSequenceInField | State::EscapeSequenceInQuotedField)
+        matches!(
+            state,
+            State::EscapeSequenceInField | State::EscapeSequenceInQuotedField
+        )
     }
 }

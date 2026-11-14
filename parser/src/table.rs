@@ -1,4 +1,8 @@
-use crate::{config::Config, dfa::Dfa, reference::{State, TransitionAction, transition_next_state}};
+use crate::{
+    config::Config,
+    dfa::Dfa,
+    reference::{State, TransitionAction, transition_next_state},
+};
 
 pub struct TableDfa {
     /// Next state index for every input byte and current state.
@@ -34,7 +38,6 @@ pub fn is_output(state: usize) -> bool {
 pub fn is_field_emit(state: usize) -> bool {
     state >= state_to_index(State::EndField) as usize
 }
-
 
 impl TableDfa {
     fn build_transition_table(&mut self, config: &Config) {
@@ -118,11 +121,13 @@ impl Dfa for TableDfa {
 
     #[inline(always)]
     fn in_quoted_field(&self, state: Self::State) -> bool {
-        state == state_to_index(State::InQuotedFieldOutput) as usize || state == state_to_index(State::InQuotedFieldDiscard) as usize
+        state == state_to_index(State::InQuotedFieldOutput) as usize
+            || state == state_to_index(State::InQuotedFieldDiscard) as usize
     }
 
     #[inline(always)]
     fn in_escape_sequence(&self, state: Self::State) -> bool {
-        state == state_to_index(State::EscapeSequenceInField) as usize || state == state_to_index(State::EscapeSequenceInQuotedField) as usize
+        state == state_to_index(State::EscapeSequenceInField) as usize
+            || state == state_to_index(State::EscapeSequenceInQuotedField) as usize
     }
 }

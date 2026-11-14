@@ -19,7 +19,8 @@ pub use zerocopy::ZeroCopyParser;
 enum Exit {
     EndRecord,
     Refill,
-    FieldEndsFull, Error,
+    FieldEndsFull,
+    Error,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -75,7 +76,9 @@ impl Stopped {
     fn error(self, position: Position) -> Error {
         match self {
             Stopped::Parser => Error::Parser(position),
-            Stopped::IO => Error::IO(std::io::Error::other("the parser stopped after an earlier IO error")),
+            Stopped::IO => Error::IO(std::io::Error::other(
+                "the parser stopped after an earlier IO error",
+            )),
         }
     }
 }
@@ -105,4 +108,3 @@ pub struct PerState;
 impl Sets for PerState {
     const PER_STATE: bool = true;
 }
-

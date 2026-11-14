@@ -15,7 +15,11 @@ pub struct CmpOr<V> {
 /// The lanes of `v` equal to one of `needles`.
 #[inline(always)]
 fn any_eq<V: ByteVector, const N: usize>(v: V, needles: [V; N]) -> Mask<V> {
-    needles.map(|needle| v.simd_eq(needle)).into_iter().reduce(|a, b| a | b).unwrap()
+    needles
+        .map(|needle| v.simd_eq(needle))
+        .into_iter()
+        .reduce(|a, b| a | b)
+        .unwrap()
 }
 
 impl<V: ByteVector> Classifier for CmpOr<V> {

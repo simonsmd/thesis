@@ -1,6 +1,10 @@
-use crate::{config::{Config, RecordTerminator}, dfa::Dfa, reference::{State, transition_next_state}};
+use crate::{
+    config::{Config, RecordTerminator},
+    dfa::Dfa,
+    reference::{State, transition_next_state},
+};
 
-const NUM_EQUIVALENCE_CLASSES: usize =  7;
+const NUM_EQUIVALENCE_CLASSES: usize = 7;
 
 pub struct ClassDfa {
     transition_table: [[u8; 11]; NUM_EQUIVALENCE_CLASSES],
@@ -32,7 +36,6 @@ pub fn is_field_emit(state: usize) -> bool {
     state >= state_to_index(State::EndField) as usize
 }
 
-
 impl ClassDfa {
     // each equivalence class besides the non structural bytes has only one byte per class
     // TODO: does it make sense to have \r and \n in the same class in CRLF mode
@@ -52,7 +55,7 @@ impl ClassDfa {
             RecordTerminator::CRLF => {
                 self.add_equivalence_class(b'\n');
                 self.add_equivalence_class(b'\r');
-            },
+            }
             RecordTerminator::Byte(b) => self.add_equivalence_class(b),
         }
 
@@ -70,7 +73,7 @@ impl ClassDfa {
             self.add_equivalence_class(b);
         }
     }
-    
+
     fn build_transition_table(&mut self, config: &Config) {
         use State::*;
         const STATES: [State; 11] = [
@@ -93,7 +96,8 @@ impl ClassDfa {
                 let class = self.class_table[b as usize];
                 // TODO: debug_assert that no conflicting entries are written to catch errors in
                 // the equivalence class table
-                self.transition_table[class as usize][state_to_index(state) as usize] = state_to_index(next_state);
+                self.transition_table[class as usize][state_to_index(state) as usize] =
+                    state_to_index(next_state);
             }
         }
     }
@@ -153,12 +157,13 @@ impl Dfa for ClassDfa {
 
     #[inline(always)]
     fn in_quoted_field(&self, state: Self::State) -> bool {
-        state == state_to_index(State::InQuotedFieldOutput) as usize || state == state_to_index(State::InQuotedFieldDiscard) as usize
+        state == state_to_index(State::InQuotedFieldOutput) as usize
+            || state == state_to_index(State::InQuotedFieldDiscard) as usize
     }
 
     #[inline(always)]
     fn in_escape_sequence(&self, state: Self::State) -> bool {
-        state == state_to_index(State::EscapeSequenceInField) as usize || state == state_to_index(State::EscapeSequenceInQuotedField) as usize
+        state == state_to_index(State::EscapeSequenceInField) as usize
+            || state == state_to_index(State::EscapeSequenceInQuotedField) as usize
     }
 }
-

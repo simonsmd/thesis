@@ -18,8 +18,8 @@ use csv_core::{ReadRecordResult, Reader, ReaderBuilder, Terminator as CoreTermin
 use csv_parser::buffer::Buffer;
 
 use crate::{
-    dialect::{Dialect, QuoteStyle, Terminator},
     check::Digest,
+    dialect::{Dialect, QuoteStyle, Terminator},
     parsers::{Consumer, ErrorAt, Options, OwnedRecord, Parser, Prepared, Records, Statistics},
 };
 
@@ -102,7 +102,10 @@ impl<'a> CoreStream<'a> {
             if self.pos == self.buffer.len() && !self.eof {
                 // nothing is kept: csv-core carries partial records in its own output
                 let len = self.buffer.len();
-                let refill = self.buffer.fill(&mut self.source, len, len, 0).expect("slice reads cannot fail");
+                let refill = self
+                    .buffer
+                    .fill(&mut self.source, len, len, 0)
+                    .expect("slice reads cannot fail");
                 self.pos = len - refill.shift;
                 self.eof = refill.read == 0;
             }
@@ -127,7 +130,9 @@ impl<'a> CoreStream<'a> {
                     let len = self.ends.len() * 2;
                     self.ends.resize(len, 0);
                 }
-                ReadRecordResult::Record => return Some((&self.output[..out_len], &self.ends[..ends_len])),
+                ReadRecordResult::Record => {
+                    return Some((&self.output[..out_len], &self.ends[..ends_len]));
+                }
                 ReadRecordResult::End => return None,
             }
         }
@@ -157,7 +162,11 @@ struct CoreFields<'a> {
 
 impl<'a> CoreFields<'a> {
     fn new(output: &'a [u8], ends: &'a [usize]) -> Self {
-        Self { output, ends: ends.iter(), start: 0 }
+        Self {
+            output,
+            ends: ends.iter(),
+            start: 0,
+        }
     }
 }
 
@@ -216,7 +225,10 @@ fn core_records<'a>(d: &Dialect, input: &'a [u8], o: &Options) -> Records<'a> {
             let (output, ends) = stream.next()?;
             CoreFields::new(output, ends).map(<[u8]>::to_vec).collect()
         };
-        Some(Ok(OwnedRecord { fields, end: stream.offset() }))
+        Some(Ok(OwnedRecord {
+            fields,
+            end: stream.offset(),
+        }))
     }))
 }
 
@@ -273,9 +285,18 @@ impl<'a> PreparedReader<'a> {
     fn consume<C: Consumer>(&mut self, input: &'a [u8], consumer: &mut C) {
         *self.reader.get_mut() = Cursor::new(input);
         // `seek` would skip this when the position already matches
-        self.reader.seek_raw(SeekFrom::Start(0), csv::Position::new()).expect("seeking a cursor cannot fail");
-        while self.reader.read_byte_record(&mut self.record).expect("flexible byte records cannot fail") {
-            consumer.record(Counted { fields: self.record.iter(), len: self.record.len() });
+        self.reader
+            .seek_raw(SeekFrom::Start(0), csv::Position::new())
+            .expect("seeking a cursor cannot fail");
+        while self
+            .reader
+            .read_byte_record(&mut self.record)
+            .expect("flexible byte records cannot fail")
+        {
+            consumer.record(Counted {
+                fields: self.record.iter(),
+                len: self.record.len(),
+            });
         }
     }
 }
@@ -296,17 +317,26 @@ impl<'a> Prepared<'a> for PreparedReader<'a> {
 
 fn prepare_reader<'a>(d: &Dialect, input: &'a [u8], o: &Options) -> Box<dyn Prepared<'a> + 'a> {
     let reader = csv_reader(d, Cursor::new(input), o);
-    Box::new(PreparedReader { reader, record: csv::ByteRecord::new() })
+    Box::new(PreparedReader {
+        reader,
+        record: csv::ByteRecord::new(),
+    })
 }
 
 fn reader_records<'a>(d: &Dialect, input: &'a [u8], o: &Options) -> Records<'a> {
     let mut reader = csv_reader(d, input, o);
     let mut record = csv::ByteRecord::new();
     Box::new(std::iter::from_fn(move || {
-        if !reader.read_byte_record(&mut record).expect("flexible byte records cannot fail") {
+        if !reader
+            .read_byte_record(&mut record)
+            .expect("flexible byte records cannot fail")
+        {
             return None;
         }
         let fields = record.iter().map(<[u8]>::to_vec).collect();
-        Some(Ok(OwnedRecord { fields, end: reader.position().byte() as usize }))
+        Some(Ok(OwnedRecord {
+            fields,
+            end: reader.position().byte() as usize,
+        }))
     }))
 }

@@ -40,12 +40,17 @@ fn main() {
                 })
                 .collect();
             trials.extend(selection.skipped.into_iter().map(|s| {
-                Trial::test(format!("{dataset}/{} ({})", &s.id[..10.min(s.id.len())], s.reason), || Ok(()))
-                    .with_ignored_flag(true)
+                Trial::test(
+                    format!("{dataset}/{} ({})", &s.id[..10.min(s.id.len())], s.reason),
+                    || Ok(()),
+                )
+                .with_ignored_flag(true)
             }));
             trials
         }
-        Err(error) => vec![Trial::test(format!("{dataset} ({error})"), || Ok(())).with_ignored_flag(true)],
+        Err(error) => {
+            vec![Trial::test(format!("{dataset} ({error})"), || Ok(())).with_ignored_flag(true)]
+        }
     };
 
     libtest_mimic::run(&args, trials).exit();
@@ -53,7 +58,13 @@ fn main() {
 
 fn check_file(input: &harness::inputs::Input) -> Result<(), Failed> {
     let data = input.read()?;
-    let report = check::check(&parsers::reference(), &parsers::all(), &input.dialect, &data, &[Options::default()]);
+    let report = check::check(
+        &parsers::reference(),
+        &parsers::all(),
+        &input.dialect,
+        &data,
+        &[Options::default()],
+    );
     let failures: Vec<String> = report
         .unexpected_mismatches()
         .map(|o| match &o.verdict {
@@ -64,6 +75,12 @@ fn check_file(input: &harness::inputs::Input) -> Result<(), Failed> {
     if failures.is_empty() {
         Ok(())
     } else {
-        Err(format!("dialect: {}\npath: {}\n{}", input.dialect, input.path.display(), failures.join("\n")).into())
+        Err(format!(
+            "dialect: {}\npath: {}\n{}",
+            input.dialect,
+            input.path.display(),
+            failures.join("\n")
+        )
+        .into())
     }
 }

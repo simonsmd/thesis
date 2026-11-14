@@ -2,10 +2,7 @@
 
 use std::{fs, io};
 
-use perf_event::{
-    Builder, Counter, Group,
-    events::Hardware,
-};
+use perf_event::{Builder, Counter, Group, events::Hardware};
 use serde::Serialize;
 
 /// Hardware counter values for one sample, all of this thread and over exactly the same interval.
@@ -49,7 +46,13 @@ impl Counters {
         let instructions = hardware(Hardware::INSTRUCTIONS)?;
         let branches = hardware(Hardware::BRANCH_INSTRUCTIONS)?;
         let branch_misses = hardware(Hardware::BRANCH_MISSES)?;
-        Ok(Self { group, cycles, instructions, branches, branch_misses })
+        Ok(Self {
+            group,
+            cycles,
+            instructions,
+            branches,
+            branch_misses,
+        })
     }
 
     #[inline]
@@ -139,9 +142,15 @@ pub fn is_hybrid() -> bool {
 fn hybrid_pmu_type(cpu: usize) -> Option<u32> {
     for pmu in ["cpu_core", "cpu_atom"] {
         let dir = format!("/sys/bus/event_source/devices/{pmu}");
-        let Ok(cpus) = fs::read_to_string(format!("{dir}/cpus")) else { continue };
+        let Ok(cpus) = fs::read_to_string(format!("{dir}/cpus")) else {
+            continue;
+        };
         if cpu_list_contains(&cpus, cpu) {
-            return fs::read_to_string(format!("{dir}/type")).ok()?.trim().parse().ok();
+            return fs::read_to_string(format!("{dir}/type"))
+                .ok()?
+                .trim()
+                .parse()
+                .ok();
         }
     }
     None
@@ -192,7 +201,10 @@ mod tests {
         assert!(usage.voluntary_switches >= 1, "{usage:?}");
         assert!(usage.page_faults >= 1000, "{usage:?}");
         // the sleep is not on-CPU time
-        assert!(usage.cpu_time > 0 && usage.cpu_time + 15_000_000 < wall, "{usage:?}, wall {wall}");
+        assert!(
+            usage.cpu_time > 0 && usage.cpu_time + 15_000_000 < wall,
+            "{usage:?}, wall {wall}"
+        );
     }
 
     #[test]
@@ -211,7 +223,10 @@ mod tests {
             spin = std::hint::black_box(spin.wrapping_add(i));
         }
         let reading = counters.stop().unwrap();
-        assert!(reading.instructions >= 10_000_000 && reading.branches >= 10_000_000, "{reading:?}");
+        assert!(
+            reading.instructions >= 10_000_000 && reading.branches >= 10_000_000,
+            "{reading:?}"
+        );
         assert!(reading.cycles > 0, "{reading:?}");
     }
 

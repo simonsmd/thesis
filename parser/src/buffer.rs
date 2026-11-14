@@ -242,7 +242,10 @@ mod tests {
     fn a_record_stays_contiguous_across_refills() {
         let data = source_bytes(200);
         let mut buffer = Buffer::with_capacity(16);
-        let mut source = Trickle { data: &data, step: 7 };
+        let mut source = Trickle {
+            data: &data,
+            step: 7,
+        };
 
         let records = parse(&mut buffer, &mut source, 40, 0, 0);
         assert_eq!(records.concat(), data);
@@ -253,7 +256,10 @@ mod tests {
     fn the_buffer_grows_for_a_record_larger_than_its_capacity() {
         let data = source_bytes(1000);
         let mut buffer = Buffer::with_capacity(16);
-        let mut source = Trickle { data: &data, step: 5 };
+        let mut source = Trickle {
+            data: &data,
+            step: 5,
+        };
 
         let records = parse(&mut buffer, &mut source, 1000, 0, 0);
         assert_eq!(records, vec![data]);
@@ -266,7 +272,10 @@ mod tests {
         // is released as soon as the next one starts.
         let data = source_bytes(4096);
         let mut buffer = Buffer::with_capacity(64);
-        let mut source = Trickle { data: &data, step: 13 };
+        let mut source = Trickle {
+            data: &data,
+            step: 13,
+        };
 
         let records = parse(&mut buffer, &mut source, 8, 0, 0);
         assert_eq!(records.concat(), data);
@@ -284,7 +293,10 @@ mod tests {
             .collect();
 
         let mut buffer = Buffer::with_capacity(16);
-        let mut source = Trickle { data: &data, step: 7 };
+        let mut source = Trickle {
+            data: &data,
+            step: 7,
+        };
 
         let records = parse(&mut buffer, &mut source, 25, 3, 0);
         assert_eq!(records.concat(), expected);
@@ -303,7 +315,10 @@ mod tests {
         // small and large records, so refills both reclaim space and grow
         for record_len in [5, 400] {
             let mut buffer = Buffer::with_capacity(16);
-            let mut source = Trickle { data: &data, step: 7 };
+            let mut source = Trickle {
+                data: &data,
+                step: 7,
+            };
 
             let records = parse(&mut buffer, &mut source, record_len, 3, 10);
             assert_eq!(records.concat(), expected);
@@ -313,12 +328,21 @@ mod tests {
     #[test]
     fn fill_leaves_the_gap_before_the_new_input() {
         let mut buffer = Buffer::with_capacity(8);
-        let mut source = Trickle { data: b"abcdef", step: 3 };
+        let mut source = Trickle {
+            data: b"abcdef",
+            step: 3,
+        };
 
-        assert_eq!(buffer.fill(&mut source, 0, 0, 4).unwrap(), Refill { shift: 0, read: 3 });
+        assert_eq!(
+            buffer.fill(&mut source, 0, 0, 4).unwrap(),
+            Refill { shift: 0, read: 3 }
+        );
         assert_eq!(&buffer.data()[4..], b"abc");
         assert_eq!(buffer.source_offset(4), 0);
-        assert_eq!(buffer.fill(&mut source, 0, 2, 4).unwrap(), Refill { shift: 0, read: 3 });
+        assert_eq!(
+            buffer.fill(&mut source, 0, 2, 4).unwrap(),
+            Refill { shift: 0, read: 3 }
+        );
         assert_eq!(&buffer.data()[6..], b"def");
         assert_eq!(buffer.source_offset(6), 3);
     }
@@ -326,11 +350,20 @@ mod tests {
     #[test]
     fn fill_reports_end_of_input() {
         let mut buffer = Buffer::with_capacity(8);
-        let mut source = Trickle { data: b"ab", step: 8 };
+        let mut source = Trickle {
+            data: b"ab",
+            step: 8,
+        };
 
-        assert_eq!(buffer.fill(&mut source, 0, 0, 0).unwrap(), Refill { shift: 0, read: 2 });
+        assert_eq!(
+            buffer.fill(&mut source, 0, 0, 0).unwrap(),
+            Refill { shift: 0, read: 2 }
+        );
         assert_eq!(buffer.data(), b"ab");
-        assert_eq!(buffer.fill(&mut source, 0, 2, 0).unwrap(), Refill { shift: 0, read: 0 });
+        assert_eq!(
+            buffer.fill(&mut source, 0, 2, 0).unwrap(),
+            Refill { shift: 0, read: 0 }
+        );
         assert_eq!(buffer.data(), b"ab");
         assert_eq!(buffer.bytes_read(), 2);
     }

@@ -7,8 +7,8 @@ use std::fmt::Debug;
 use std::marker::PhantomData;
 
 use fearless_simd::{
-    Avx2, Avx512, Sse4_2, SimdFrom, SimdSplit, mask8x16, mask8x32, mask8x64,
-    prelude::*, u8x16, u8x32, u8x64,
+    Avx2, Avx512, SimdFrom, SimdSplit, Sse4_2, mask8x16, mask8x32, mask8x64, prelude::*, u8x16,
+    u8x32, u8x64,
 };
 
 use super::{

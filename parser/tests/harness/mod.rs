@@ -10,15 +10,20 @@ use csv_parser::{
     DEFAULT_CAPACITY,
     bitshift::BitshiftDfa,
     class::ClassDfa,
+    classifier::{Classifier, CmpOr, Native, NibbleMap, u8x16, u8x32, u8x64},
     config::Config,
     dfa::Dfa,
-    parser::{CompactionParser, Error, PerState, Sets, Shared, ZeroCopyParser, compaction, zerocopy},
+    parser::{
+        CompactionParser, Error, PerState, Sets, Shared, ZeroCopyParser, compaction, zerocopy,
+    },
     reference::ReferenceDfa,
-    classifier::{Classifier, CmpOr, Native, NibbleMap, u8x16, u8x32, u8x64},
     table::TableDfa,
 };
 
-#[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), target_feature = "avx2"))]
+#[cfg(all(
+    any(target_arch = "x86", target_arch = "x86_64"),
+    target_feature = "avx2"
+))]
 use csv_parser::classifier::{Pcmpestr, Pcmpistr};
 
 pub type Parsed = Result<Vec<Vec<String>>, Error>;
@@ -57,7 +62,12 @@ pub fn parse_with_capacity(config: &Config, input: &[u8], capacity: usize) -> Pa
 
     let actual = engines(config, input, capacity, Some(1))
         .into_iter()
-        .map(|(name, e)| (format!("{name} with 1 field end"), format!("{:?}", drive(e))));
+        .map(|(name, e)| {
+            (
+                format!("{name} with 1 field end"),
+                format!("{:?}", drive(e)),
+            )
+        });
     disagreements(&reference_name, &expected_text, actual);
 
     expected
@@ -103,7 +113,8 @@ fn skipping<'a, D: Dfa + 'a, C: Classifier + 'a, M: Sets + 'a>(
     let new = || CompactionParser::<_, D>::with_capacity(input, config.clone(), capacity, fields);
     let classifier = C::new(config);
     let (mut simd, mut check) = (new(), new());
-    let mut zerocopy = ZeroCopyParser::<_, D>::with_capacity(input, config.clone(), capacity, fields);
+    let mut zerocopy =
+        ZeroCopyParser::<_, D>::with_capacity(input, config.clone(), capacity, fields);
     [
         (
             format!("compaction-simd-{name}"),
@@ -138,10 +149,18 @@ macro_rules! skipping_for {
         macro_rules! sets {
             ($skip:literal, $classifier:ty) => {
                 engines.extend(skipping::<$dfa, $classifier, Shared>(
-                    concat!($skip, "-shared/", $name), $config, $input, $capacity, $fields,
+                    concat!($skip, "-shared/", $name),
+                    $config,
+                    $input,
+                    $capacity,
+                    $fields,
                 ));
                 engines.extend(skipping::<$dfa, $classifier, PerState>(
-                    concat!($skip, "-state/", $name), $config, $input, $capacity, $fields,
+                    concat!($skip, "-state/", $name),
+                    $config,
+                    $input,
+                    $capacity,
+                    $fields,
                 ));
             };
         }
@@ -151,7 +170,10 @@ macro_rules! skipping_for {
         sets!("nibble-map-16", NibbleMap<u8x16<Native>>);
         sets!("nibble-map-32", NibbleMap<u8x32<Native>>);
         sets!("nibble-map-64", NibbleMap<u8x64<Native>>);
-        #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), target_feature = "avx2"))]
+        #[cfg(all(
+            any(target_arch = "x86", target_arch = "x86_64"),
+            target_feature = "avx2"
+        ))]
         {
             sets!("pcmpistr-16", Pcmpistr<u8x16<Native>>);
             sets!("pcmpistr-32", Pcmpistr<u8x32<Native>>);
@@ -170,19 +192,24 @@ macro_rules! skipping_for {
 macro_rules! engines_for {
     ($dfa:ty, $name:literal, $config:expr, $input:expr, $capacity:expr, $fields:expr) => {{
         let fields = $fields.unwrap_or(compaction::DEFAULT_FIELDS);
-        let mut compaction = CompactionParser::<_, $dfa>::with_capacity($input, $config.clone(), $capacity, fields);
+        let mut compaction =
+            CompactionParser::<_, $dfa>::with_capacity($input, $config.clone(), $capacity, fields);
         let mut zerocopy = ZeroCopyParser::<_, $dfa>::with_capacity(
             $input,
             $config.clone(),
             $capacity,
             $fields.unwrap_or(zerocopy::DEFAULT_FIELDS),
         );
-        let mut branchless = CompactionParser::<_, $dfa>::with_capacity($input, $config.clone(), $capacity, fields);
+        let mut branchless =
+            CompactionParser::<_, $dfa>::with_capacity($input, $config.clone(), $capacity, fields);
         let mut engines = vec![
             (
                 concat!("compaction/", $name).to_string(),
-                Box::new(move || compaction.read_record().map(|r| r.map(|r| strings(r.iter()))))
-                    as Engine,
+                Box::new(move || {
+                    compaction
+                        .read_record()
+                        .map(|r| r.map(|r| strings(r.iter())))
+                }) as Engine,
             ),
             (
                 concat!("zerocopy/", $name).to_string(),
@@ -197,7 +224,9 @@ macro_rules! engines_for {
                 }),
             ),
         ];
-        engines.extend(skipping_for!($dfa, $name, $config, $input, $capacity, fields));
+        engines.extend(skipping_for!(
+            $dfa, $name, $config, $input, $capacity, fields
+        ));
         engines
     }};
 }

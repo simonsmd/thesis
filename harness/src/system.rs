@@ -114,7 +114,9 @@ pub fn system(cpu: Option<usize>) -> System {
     System {
         hostname: read("/proc/sys/kernel/hostname"),
         os: read("/etc/os-release").and_then(|text| {
-            let name = text.lines().find_map(|line| line.strip_prefix("PRETTY_NAME="))?;
+            let name = text
+                .lines()
+                .find_map(|line| line.strip_prefix("PRETTY_NAME="))?;
             Some(name.trim_matches('"').to_owned())
         }),
         kernel: read("/proc/sys/kernel/osrelease"),
@@ -122,25 +124,34 @@ pub fn system(cpu: Option<usize>) -> System {
         cpu_model: field("model name"),
         cpu_family_model_stepping: family_model_stepping,
         microcode: field("microcode"),
-        virtual_machine: field("flags").map(|flags| flags.split(' ').any(|flag| flag == "hypervisor")),
+        virtual_machine: field("flags")
+            .map(|flags| flags.split(' ').any(|flag| flag == "hypervisor")),
         caches,
         memory_kb: read("/proc/meminfo").and_then(|text| {
-            let total = text.lines().find_map(|line| line.strip_prefix("MemTotal:"))?;
+            let total = text
+                .lines()
+                .find_map(|line| line.strip_prefix("MemTotal:"))?;
             total.trim().trim_end_matches("kB").trim().parse().ok()
         }),
         smt_active: read("/sys/devices/system/cpu/smt/active").map(|v| v == "1"),
         core_siblings: read(&format!("{cpu_dir}/topology/thread_siblings_list")),
         governor: read(&format!("{cpu_dir}/cpufreq/scaling_governor")),
         scaling_driver: read(&format!("{cpu_dir}/cpufreq/scaling_driver")),
-        energy_performance_preference: read(&format!("{cpu_dir}/cpufreq/energy_performance_preference")),
-        max_frequency_khz: read(&format!("{cpu_dir}/cpufreq/cpuinfo_max_freq")).and_then(|v| v.parse().ok()),
+        energy_performance_preference: read(&format!(
+            "{cpu_dir}/cpufreq/energy_performance_preference"
+        )),
+        max_frequency_khz: read(&format!("{cpu_dir}/cpufreq/cpuinfo_max_freq"))
+            .and_then(|v| v.parse().ok()),
         turbo,
         // the file lists all choices with the active one in brackets: `always [madvise] never`
-        transparent_hugepages: read("/sys/kernel/mm/transparent_hugepage/enabled").and_then(|text| {
-            let (_, rest) = text.split_once('[')?;
-            Some(rest.split_once(']')?.0.to_owned())
-        }),
-        perf_event_paranoid: read("/proc/sys/kernel/perf_event_paranoid").and_then(|v| v.parse().ok()),
+        transparent_hugepages: read("/sys/kernel/mm/transparent_hugepage/enabled").and_then(
+            |text| {
+                let (_, rest) = text.split_once('[')?;
+                Some(rest.split_once(']')?.0.to_owned())
+            },
+        ),
+        perf_event_paranoid: read("/proc/sys/kernel/perf_event_paranoid")
+            .and_then(|v| v.parse().ok()),
         load_at_start: read("/proc/loadavg").and_then(|text| text.split(' ').next()?.parse().ok()),
     }
 }
@@ -158,7 +169,9 @@ pub fn compact_timestamp() -> String {
 }
 
 fn now() -> (String, String) {
-    let secs = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs()) as i64;
+    let secs = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs()) as i64;
     let (days, rem) = (secs.div_euclid(86400), secs.rem_euclid(86400));
     // civil_from_days, from Howard Hinnant's date algorithms
     let z = days + 719468;

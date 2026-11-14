@@ -38,12 +38,17 @@ fn main() -> Result<(), String> {
     let args = Args::parse();
     let (data, input_bytes) = match &args.path {
         Some(path) => {
-            let size = path.metadata().map_err(|e| format!("{}: {e}", path.display()))?.len();
+            let size = path
+                .metadata()
+                .map_err(|e| format!("{}: {e}", path.display()))?
+                .len();
             (Data::map(path, args.encoding.as_deref())?, size)
         }
         None => {
             let mut raw = Vec::new();
-            std::io::stdin().read_to_end(&mut raw).map_err(|e| e.to_string())?;
+            std::io::stdin()
+                .read_to_end(&mut raw)
+                .map_err(|e| e.to_string())?;
             let size = raw.len() as u64;
             (Data::from_bytes(raw, args.encoding.as_deref())?, size)
         }
@@ -52,7 +57,8 @@ fn main() -> Result<(), String> {
 
     let (dialect, detection, seen) = match &args.dialect {
         Some(given) => {
-            let dialect: Dialect = serde_json::from_str(given).map_err(|e| format!("--dialect: {e}"))?;
+            let dialect: Dialect =
+                serde_json::from_str(given).map_err(|e| format!("--dialect: {e}"))?;
             dialect.validate().map_err(|e| format!("--dialect: {e}"))?;
             let seen = sniff::observe(&dialect, &data, complete, true, args.parts);
             (dialect, None, seen)

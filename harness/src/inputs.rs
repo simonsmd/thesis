@@ -155,7 +155,10 @@ impl FromStr for Size {
 
     fn from_str(s: &str) -> Result<Self, String> {
         let t = s.trim();
-        let t = t.strip_suffix("iB").or_else(|| t.strip_suffix('B')).unwrap_or(t);
+        let t = t
+            .strip_suffix("iB")
+            .or_else(|| t.strip_suffix('B'))
+            .unwrap_or(t);
         let (number, unit) = match t.char_indices().last() {
             Some((i, c)) if c.is_ascii_alphabetic() => (&t[..i], c.to_ascii_uppercase()),
             _ => (t, ' '),
@@ -168,7 +171,10 @@ impl FromStr for Size {
             'T' => 40,
             _ => return Err(format!("unknown size unit in {s:?}")),
         };
-        let number: f64 = number.trim().parse().map_err(|_| format!("invalid size {s:?}"))?;
+        let number: f64 = number
+            .trim()
+            .parse()
+            .map_err(|_| format!("invalid size {s:?}"))?;
         Ok(Size((number * (1u64 << shift) as f64) as u64))
     }
 }
@@ -258,7 +264,9 @@ impl InputArgs {
 
         for name in &self.dataset {
             let dataset = store.dataset(name)?;
-            selection.datasets.push((dataset.name.clone(), dataset.hash.clone()));
+            selection
+                .datasets
+                .push((dataset.name.clone(), dataset.hash.clone()));
 
             for (hash, entry) in &dataset.files {
                 if !seen.insert(hash.clone()) || !self.size_ok(entry.size) {
@@ -272,11 +280,17 @@ impl InputArgs {
                 }
 
                 let path = store.corpus_path(hash);
-                let skip = |reason: String| Skipped { id: hash.clone(), path: path.clone(), reason };
+                let skip = |reason: String| Skipped {
+                    id: hash.clone(),
+                    path: path.clone(),
+                    reason,
+                };
                 let (dialect, dialect_source) = match store.dialect(hash, entry) {
                     Ok(d) => d,
                     Err(e) => {
-                        selection.skipped.push(skip(format!("incomplete dialect: {e}")));
+                        selection
+                            .skipped
+                            .push(skip(format!("incomplete dialect: {e}")));
                         continue;
                     }
                 };
@@ -302,7 +316,11 @@ impl InputArgs {
                     size: entry.size,
                     dataset: Some(dataset.name.clone()),
                     bucket: entry.bucket,
-                    encoding: entry.encoding.as_ref().and_then(|e| e.name()).map(str::to_owned),
+                    encoding: entry
+                        .encoding
+                        .as_ref()
+                        .and_then(|e| e.name())
+                        .map(str::to_owned),
                     dialect,
                     dialect_source,
                     dialect_adjusted: false,
@@ -313,7 +331,8 @@ impl InputArgs {
         if !self.file.is_empty() {
             let index = store.index();
             for path in &self.file {
-                if let Some(input) = self.file_input(&store, &index, path, &mut selection.skipped)?
+                if let Some(input) =
+                    self.file_input(&store, &index, path, &mut selection.skipped)?
                     && seen.insert(input.id.clone())
                     && self.size_ok(input.size)
                 {
@@ -326,7 +345,8 @@ impl InputArgs {
     }
 
     fn size_ok(&self, size: u64) -> bool {
-        self.max_size.is_none_or(|max| size <= max.0) && self.min_size.is_none_or(|min| size >= min.0)
+        self.max_size.is_none_or(|max| size <= max.0)
+            && self.min_size.is_none_or(|min| size >= min.0)
     }
 
     fn file_input(
@@ -336,8 +356,14 @@ impl InputArgs {
         path: &Path,
         skipped: &mut Vec<Skipped>,
     ) -> Result<Option<Input>, String> {
-        let size = path.metadata().map_err(|e| format!("{}: {e}", path.display()))?.len();
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+        let size = path
+            .metadata()
+            .map_err(|e| format!("{}: {e}", path.display()))?
+            .len();
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
 
         let known = dataset::is_content_hash(name).then(|| {
             let entry = index.get(name);
@@ -362,14 +388,20 @@ impl InputArgs {
             Some(Ok(known)) => known,
             // an incomplete sniffed dialect can still be completed with the flags
             Some(Err(e)) if self.dialect.is_empty() => {
-                skipped.push(Skipped { id, path: path.to_owned(), reason: format!("incomplete dialect: {e}") });
+                skipped.push(Skipped {
+                    id,
+                    path: path.to_owned(),
+                    reason: format!("incomplete dialect: {e}"),
+                });
                 return Ok(None);
             }
             Some(Err(_)) | None => (Dialect::default(), DialectSource::Default),
         };
         let before = dialect.clone();
         self.dialect.apply(&mut dialect);
-        dialect.validate().map_err(|e| format!("{}: {e}", path.display()))?;
+        dialect
+            .validate()
+            .map_err(|e| format!("{}: {e}", path.display()))?;
 
         Ok(Some(Input {
             id,
@@ -396,7 +428,16 @@ mod tests {
             #[command(flatten)]
             dialect: DialectArgs,
         }
-        let args = <Args as clap::Parser>::try_parse_from(["x", "--quote", "none", "--escape", "\\", "--comment", "#"]).unwrap();
+        let args = <Args as clap::Parser>::try_parse_from([
+            "x",
+            "--quote",
+            "none",
+            "--escape",
+            "\\",
+            "--comment",
+            "#",
+        ])
+        .unwrap();
         assert_eq!(args.dialect.quote, Some(OptionalByte(None)));
         assert_eq!(args.dialect.escape, Some(OptionalByte(Some(Byte(b'\\')))));
         assert_eq!(args.dialect.comment, Some(OptionalByte(Some(Byte(b'#')))));

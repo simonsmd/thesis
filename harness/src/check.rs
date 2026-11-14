@@ -54,22 +54,39 @@ fn hex<S: serde::Serializer>(hash: &u128, s: S) -> Result<S::Ok, S::Error> {
 
 impl Fingerprint {
     fn new((digest, error): (Digest, Option<ErrorAt>)) -> Self {
-        Fingerprint { hash: digest.hasher.digest128(), statistics: digest.statistics, error }
+        Fingerprint {
+            hash: digest.hasher.digest128(),
+            statistics: digest.statistics,
+            error,
+        }
     }
 }
 
 /// Parse `input` twice with one parser: fresh from construction, and again after a reset.
-pub fn fingerprints(parser: &Parser, dialect: &Dialect, input: &[u8], options: &Options) -> [Fingerprint; 2] {
+pub fn fingerprints(
+    parser: &Parser,
+    dialect: &Dialect,
+    input: &[u8],
+    options: &Options,
+) -> [Fingerprint; 2] {
     let mut prepared = (parser.prepare)(dialect, input, options);
-    [Fingerprint::new(prepared.digest(input)), Fingerprint::new(prepared.digest(input))]
+    [
+        Fingerprint::new(prepared.digest(input)),
+        Fingerprint::new(prepared.digest(input)),
+    ]
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "verdict", rename_all = "lowercase")]
 pub enum Verdict {
     Agree,
-    Unsupported { reason: &'static str },
-    Mismatch { fingerprint: Fingerprint, difference: String },
+    Unsupported {
+        reason: &'static str,
+    },
+    Mismatch {
+        fingerprint: Fingerprint,
+        difference: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -91,13 +108,16 @@ pub struct Report {
 
 impl Report {
     pub fn mismatches(&self) -> impl Iterator<Item = &Outcome> {
-        self.outcomes.iter().filter(|o| matches!(o.verdict, Verdict::Mismatch { .. }))
+        self.outcomes
+            .iter()
+            .filter(|o| matches!(o.verdict, Verdict::Mismatch { .. }))
     }
 
     /// Mismatches, except rust-csv's where the reference stops with an error: rust-csv never
     /// reports one, so it is expected to differ there.
     pub fn unexpected_mismatches(&self) -> impl Iterator<Item = &Outcome> {
-        self.mismatches().filter(|o| o.ours || self.reference.error.is_none())
+        self.mismatches()
+            .filter(|o| o.ours || self.reference.error.is_none())
     }
 }
 
@@ -125,8 +145,12 @@ pub fn check(
                 Ok(()) => match fingerprints(parser, dialect, input, options) {
                     [fresh, reset] if fresh == expected && reset == expected => Verdict::Agree,
                     [fresh, _] if fresh != expected => {
-                        let difference = first_difference(reference, parser, dialect, input, options);
-                        Verdict::Mismatch { fingerprint: fresh, difference }
+                        let difference =
+                            first_difference(reference, parser, dialect, input, options);
+                        Verdict::Mismatch {
+                            fingerprint: fresh,
+                            difference,
+                        }
                     }
                     [_, reset] => Verdict::Mismatch {
                         fingerprint: reset,
@@ -134,15 +158,29 @@ pub fn check(
                     },
                 },
             };
-            outcomes.push(Outcome { parser: parser.name, ours: parser.is_ours(), options: *options, verdict });
+            outcomes.push(Outcome {
+                parser: parser.name,
+                ours: parser.is_ours(),
+                options: *options,
+                verdict,
+            });
         }
     }
 
-    Report { reference: expected, outcomes }
+    Report {
+        reference: expected,
+        outcomes,
+    }
 }
 
 /// Run both parsers in lockstep and describe the first record where they differ.
-pub fn first_difference(reference: &Parser, parser: &Parser, dialect: &Dialect, input: &[u8], options: &Options) -> String {
+pub fn first_difference(
+    reference: &Parser,
+    parser: &Parser,
+    dialect: &Dialect,
+    input: &[u8],
+    options: &Options,
+) -> String {
     let mut expected = (reference.records)(dialect, input, &Options::default());
     let mut actual = (parser.records)(dialect, input, options);
     // where the current record starts in the input, according to the reference
@@ -164,7 +202,12 @@ pub fn first_difference(reference: &Parser, parser: &Parser, dialect: &Dialect, 
         let mut out = format!("record {index} differs\n");
         // show the records from their first differing field on
         let skip = match (&e, &a) {
-            (Some(Ok(e)), Some(Ok(a))) => e.fields.iter().zip(&a.fields).take_while(|(e, a)| e == a).count(),
+            (Some(Ok(e)), Some(Ok(a))) => e
+                .fields
+                .iter()
+                .zip(&a.fields)
+                .take_while(|(e, a)| e == a)
+                .count(),
             _ => 0,
         };
         let _ = writeln!(out, "  reference: {}", describe(&e, skip));
@@ -175,7 +218,11 @@ pub fn first_difference(reference: &Parser, parser: &Parser, dialect: &Dialect, 
             (Some(Err(err)), _) | (_, Some(Err(err))) => err.byte + 1,
             _ => start,
         };
-        let _ = write!(out, "  input at byte {start}: {}", excerpt(input, start, end));
+        let _ = write!(
+            out,
+            "  input at byte {start}: {}",
+            excerpt(input, start, end)
+        );
         return out;
     }
     unreachable!()
@@ -183,7 +230,10 @@ pub fn first_difference(reference: &Parser, parser: &Parser, dialect: &Dialect, 
 
 /// Equal records and errors; where a record ends is not compared, since parsers count it
 /// differently.
-fn same(e: &Option<Result<OwnedRecord, ErrorAt>>, a: &Option<Result<OwnedRecord, ErrorAt>>) -> bool {
+fn same(
+    e: &Option<Result<OwnedRecord, ErrorAt>>,
+    a: &Option<Result<OwnedRecord, ErrorAt>>,
+) -> bool {
     match (e, a) {
         (Some(Ok(e)), Some(Ok(a))) => e.fields == a.fields,
         _ => e == a,

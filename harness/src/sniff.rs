@@ -46,13 +46,18 @@ const IN_QUOTED_FIELD: u8 = 2;
 const IN_COMMENT: u8 = 7;
 
 fn index_of(state: State) -> u8 {
-    STATES.iter().position(|s| *s == state).expect("STATES lists every state") as u8
+    STATES
+        .iter()
+        .position(|s| *s == state)
+        .expect("STATES lists every state") as u8
 }
 
 fn in_quotes(state: u8) -> bool {
     matches!(
         STATES[state as usize],
-        State::InQuotedFieldOutput | State::InQuotedFieldDiscard | State::EscapeSequenceInQuotedField
+        State::InQuotedFieldOutput
+            | State::InQuotedFieldDiscard
+            | State::EscapeSequenceInQuotedField
     )
 }
 
@@ -130,7 +135,9 @@ impl Table {
         // The same sets as `csv_parser::classifier::structural_bytes*`.
         let plain_quote_allowed = dialect.quotes_in_unquoted_fields == Some(true)
             && dialect.quote_style == Some(QuoteStyle::Strict);
-        let structural = |b: u8| b == delimiter || is_terminator[b as usize] || Some(b) == quote || Some(b) == escape;
+        let structural = |b: u8| {
+            b == delimiter || is_terminator[b as usize] || Some(b) == quote || Some(b) == escape
+        };
         let structural_in_field = |b: u8| {
             b == delimiter
                 || is_terminator[b as usize]
@@ -150,7 +157,9 @@ impl Table {
                     events |= match (state, next) {
                         (State::StartRecord, State::StartRecord) => SKIPPED_TERMINATOR,
                         (State::StartRecord, State::InComment) => COMMENT_START,
-                        (State::StartRecord | State::EndField, State::InQuotedFieldDiscard) => QUOTE_OPENS_FIELD,
+                        (State::StartRecord | State::EndField, State::InQuotedFieldDiscard) => {
+                            QUOTE_OPENS_FIELD
+                        }
                         (State::InField, State::InQuotedFieldDiscard) => QUOTE_OPENS_INSIDE,
                         (State::InField, State::InField) if Some(byte) == quote => PLAIN_QUOTE,
                         (State::InQuotedFieldOutput, State::AfterQuote) => QUOTE_CLOSES,
@@ -158,10 +167,14 @@ impl Table {
                         (State::AfterQuote, State::InField) => TEXT_AFTER_QUOTE,
                         (_, State::EscapeSequenceInQuotedField) => ESCAPE_IN_QUOTES,
                         (_, State::EscapeSequenceInField) => ESCAPE_OUTSIDE_QUOTES,
-                        (State::InQuotedFieldOutput, State::InQuotedFieldOutput) if byte == delimiter => {
+                        (State::InQuotedFieldOutput, State::InQuotedFieldOutput)
+                            if byte == delimiter =>
+                        {
                             QUOTED_DELIMITER
                         }
-                        (State::InQuotedFieldOutput, State::InQuotedFieldOutput) if is_terminator[byte as usize] => {
+                        (State::InQuotedFieldOutput, State::InQuotedFieldOutput)
+                            if is_terminator[byte as usize] =>
+                        {
                             QUOTED_TERMINATOR
                         }
                         _ => 0,
@@ -200,10 +213,16 @@ impl Table {
                         events |= STRUCTURAL_HERE;
                     }
                 }
-                row[byte as usize] = Step { next: index_of(next), events };
+                row[byte as usize] = Step {
+                    next: index_of(next),
+                    events,
+                };
             }
         }
-        Self { steps, is_terminator }
+        Self {
+            steps,
+            is_terminator,
+        }
     }
 }
 
@@ -337,7 +356,11 @@ fn entropy(counts: &HashMap<u32, u64>) -> f64 {
 }
 
 fn share(part: u64, whole: u64) -> f64 {
-    if whole == 0 { 0.0 } else { part as f64 / whole as f64 }
+    if whole == 0 {
+        0.0
+    } else {
+        part as f64 / whole as f64
+    }
 }
 
 /// Rounded so that the JSON output stays short.
@@ -394,7 +417,9 @@ impl Walk<'_> {
         seen.fields_with_quoted_delimiter += (events & QUOTED_DELIMITER != 0) as u64;
         seen.fields_with_quoted_terminator += (events & QUOTED_TERMINATOR != 0) as u64;
 
-        let Some(detail) = seen.detail.as_deref_mut() else { return };
+        let Some(detail) = seen.detail.as_deref_mut() else {
+            return;
+        };
         detail.field_bytes += length as u64;
         detail.empty_fields += (length == 0) as u64;
         detail.longest_field = detail.longest_field.max(length as u64);
@@ -407,7 +432,13 @@ impl Walk<'_> {
         }
         // The content is not one unbroken piece of the input, so a parser that hands out slices
         // of the input has to copy this field.
-        if events & (DOUBLED_QUOTE | ESCAPE_IN_QUOTES | ESCAPE_OUTSIDE_QUOTES | QUOTE_OPENS_INSIDE | TEXT_AFTER_QUOTE) != 0
+        if events
+            & (DOUBLED_QUOTE
+                | ESCAPE_IN_QUOTES
+                | ESCAPE_OUTSIDE_QUOTES
+                | QUOTE_OPENS_INSIDE
+                | TEXT_AFTER_QUOTE)
+            != 0
         {
             detail.copied_fields += 1;
             detail.copied_field_bytes += length as u64;
@@ -426,11 +457,15 @@ impl Walk<'_> {
             if detail.column_fields.len() <= column {
                 detail.column_fields.resize(column + 1, 0);
                 detail.column_quoted.resize(column + 1, 0);
-                detail.column_length_counts.resize_with(column + 1, HashMap::new);
+                detail
+                    .column_length_counts
+                    .resize_with(column + 1, HashMap::new);
             }
             detail.column_fields[column] += 1;
             detail.column_quoted[column] += quoted as u64;
-            *detail.column_length_counts[column].entry(length).or_default() += 1;
+            *detail.column_length_counts[column]
+                .entry(length)
+                .or_default() += 1;
         }
     }
 
@@ -448,7 +483,9 @@ impl Walk<'_> {
         of_count.records += 1;
         of_count.bytes += bytes;
 
-        let Some(detail) = seen.detail.as_deref_mut() else { return };
+        let Some(detail) = seen.detail.as_deref_mut() else {
+            return;
+        };
         detail.record_lengths.add(bytes as usize);
         std::mem::swap(&mut detail.previous, &mut detail.current);
         detail.current.clear();
@@ -478,15 +515,21 @@ impl Walk<'_> {
     }
 
     fn structural(&mut self, position: usize, events: u32) {
-        let Some(detail) = self.seen.detail.as_deref_mut() else { return };
+        let Some(detail) = self.seen.detail.as_deref_mut() else {
+            return;
+        };
         if events & STRUCTURAL != 0 {
             detail.structural += 1;
-            detail.structural_gaps.add(position - detail.last_structural.map_or(0, |last| last + 1));
+            detail
+                .structural_gaps
+                .add(position - detail.last_structural.map_or(0, |last| last + 1));
             detail.last_structural = Some(position);
         }
         if events & STRUCTURAL_HERE != 0 {
             detail.structural_here += 1;
-            detail.structural_gaps_here.add(position - detail.last_structural_here.map_or(0, |last| last + 1));
+            detail
+                .structural_gaps_here
+                .add(position - detail.last_structural_here.map_or(0, |last| last + 1));
             detail.last_structural_here = Some(position);
         }
     }
@@ -503,7 +546,13 @@ impl Walk<'_> {
 /// `detail` also collects the length statistics. `parts` above 0 additionally counts records
 /// separately for that many equally sized pieces of the input, to see whether the file changes
 /// along the way.
-pub fn observe(dialect: &Dialect, data: &[u8], complete: bool, detail: bool, parts: usize) -> Observation {
+pub fn observe(
+    dialect: &Dialect,
+    data: &[u8],
+    complete: bool,
+    detail: bool,
+    parts: usize,
+) -> Observation {
     let table = Table::new(dialect);
     let mut walk = Walk {
         data,
@@ -578,7 +627,10 @@ pub fn observe(dialect: &Dialect, data: &[u8], complete: bool, detail: bool, par
         }
         if events & ERROR != 0 {
             walk.seen.errors += 1;
-            let line_end = data[i..].iter().position(|b| table.is_terminator[*b as usize]).map_or(data.len(), |n| i + n);
+            let line_end = data[i..]
+                .iter()
+                .position(|b| table.is_terminator[*b as usize])
+                .map_or(data.len(), |n| i + n);
             if let Some(detail) = walk.seen.detail.as_deref_mut()
                 && !detail.parts.is_empty()
             {
@@ -642,8 +694,15 @@ impl Observation {
         if count < min_columns {
             return 0.0;
         }
-        let swallowed = if self.tail_was_swallowed() { self.tail_bytes } else { 0 };
-        share(common.bytes, self.record_bytes + self.broken_bytes + swallowed)
+        let swallowed = if self.tail_was_swallowed() {
+            self.tail_bytes
+        } else {
+            0
+        };
+        share(
+            common.bytes,
+            self.record_bytes + self.broken_bytes + swallowed,
+        )
     }
 
     /// Parsed without anything that hints at a wrong dialect.
@@ -684,25 +743,39 @@ impl Observation {
             "text_after_closing_quote": self.text_after_closing_quote,
             "quotes_in_unquoted_fields": self.plain_quotes,
         });
-        let Some(detail) = &self.detail else { return report };
+        let Some(detail) = &self.detail else {
+            return report;
+        };
 
         let columns = (common as usize).min(detail.column_fields.len());
         let column_fields: u64 = detail.column_fields[..columns].iter().sum();
         // per column, weighted by how many fields the column has
         let column_entropy: f64 = (0..columns)
-            .map(|c| entropy(&detail.column_length_counts[c]) * share(detail.column_fields[c], column_fields))
+            .map(|c| {
+                entropy(&detail.column_length_counts[c])
+                    * share(detail.column_fields[c], column_fields)
+            })
             .sum();
         let quoting = |wanted: fn(u64, u64) -> bool| {
-            (0..columns).filter(|&c| wanted(detail.column_quoted[c], detail.column_fields[c])).count()
+            (0..columns)
+                .filter(|&c| wanted(detail.column_quoted[c], detail.column_fields[c]))
+                .count()
         };
-        let preamble = detail.first_field_counts.iter().position(|n| *n == common).unwrap_or(0);
+        let preamble = detail
+            .first_field_counts
+            .iter()
+            .position(|n| *n == common)
+            .unwrap_or(0);
         let parts: Vec<Value> = detail
             .parts
             .iter()
             .map(|part| {
                 let records: u64 = part.by_field_count.values().sum();
-                let (count, most) =
-                    part.by_field_count.iter().max_by_key(|(count, n)| (**n, **count)).map_or((0, 0), |(c, n)| (*c, *n));
+                let (count, most) = part
+                    .by_field_count
+                    .iter()
+                    .max_by_key(|(count, n)| (**n, **count))
+                    .map_or((0, 0), |(c, n)| (*c, *n));
                 json!({
                     "records": records,
                     "errors": part.errors,
@@ -834,7 +907,8 @@ pub fn detect(sample: &[u8], complete: bool) -> Detection {
     // 1. The delimiter. Quotes are read in the most forgiving way here, since the exact rules
     //    are only worked out in step 2. Each delimiter gets the score of its best reading.
     let score_of = |delimiter: u8| {
-        let readings = std::iter::once(None).chain(quotes.iter().map(|q| Some((*q, Quoting::Toggle))));
+        let readings =
+            std::iter::once(None).chain(quotes.iter().map(|q| Some((*q, Quoting::Toggle))));
         readings
             .map(|quote| look(&candidate(delimiter, quote, false)).score(2))
             .fold(0.0, f64::max)
@@ -851,7 +925,9 @@ pub fn detect(sample: &[u8], complete: bool) -> Detection {
             // A delimiter that splits every record alike beats an earlier one that does not:
             // `1,5;2,5` under a header `a;b` is a semicolon file. Not so for the colon, which
             // splits a column of times just as evenly.
-            Some((_, best)) => score > best + MARGIN || (score == 1.0 && best < 1.0 && delimiter != b':'),
+            Some((_, best)) => {
+                score > best + MARGIN || (score == 1.0 && best < 1.0 && delimiter != b':')
+            }
         };
         if replaces {
             best = Some((delimiter, score));
@@ -888,7 +964,11 @@ pub fn detect(sample: &[u8], complete: bool) -> Detection {
         seen.filled_quoted_fields > 0 || (quote == b'"' && seen.fully_quoted_fields > 0)
     };
     let (wrapping, other): (Vec<u8>, Vec<u8>) = quotes.iter().partition(|q| wraps_fields(**q));
-    let escapes: &[bool] = if occurs(b'\\') { &[false, true] } else { &[false] };
+    let escapes: &[bool] = if occurs(b'\\') {
+        &[false, true]
+    } else {
+        &[false]
+    };
     let with_quote = |quote: u8, quoting: Quoting| {
         escapes
             .iter()
@@ -973,7 +1053,12 @@ pub fn detect(sample: &[u8], complete: bool) -> Detection {
 /// few lines.
 fn sample_of(data: &[u8]) -> &[u8] {
     let mut length = DETECT_BYTES.min(data.len());
-    let lines = |length: usize| data[..length].iter().filter(|b| **b == b'\n' || **b == b'\r').count();
+    let lines = |length: usize| {
+        data[..length]
+            .iter()
+            .filter(|b| **b == b'\n' || **b == b'\r')
+            .count()
+    };
     while length < data.len().min(MAX_SAMPLE_BYTES) && lines(length) < SAMPLE_LINES {
         length = (length * 2).min(data.len());
     }
@@ -1054,7 +1139,10 @@ mod tests {
     #[test]
     fn delimiter() {
         // the comma splits every data row evenly too, but not the header
-        assert_eq!(dialect_of("a;b;c\n1,5;2,5;3,5\n4,5;5,5;6,5\n").delimiter, Byte(b';'));
+        assert_eq!(
+            dialect_of("a;b;c\n1,5;2,5;3,5\n4,5;5,5;6,5\n").delimiter,
+            Byte(b';')
+        );
         assert_eq!(dialect_of("a\tb\n1\t2\n").delimiter, Byte(b'\t'));
         // the colons split evenly as well, but the comma comes first
         assert_eq!(dialect_of("12:30:00,5\n12:31:00,6\n").delimiter, Byte(b','));
@@ -1067,18 +1155,27 @@ mod tests {
     #[test]
     fn quoting_is_as_strict_as_the_file_allows() {
         let d = dialect_of("a,b\n\"x,1\",2\n\"y\",3\n");
-        assert_eq!((d.quote, d.quote_style, d.quotes_in_unquoted_fields), (Some(Byte(b'"')), Some(QuoteStyle::Strict), Some(false)));
+        assert_eq!(
+            (d.quote, d.quote_style, d.quotes_in_unquoted_fields),
+            (Some(Byte(b'"')), Some(QuoteStyle::Strict), Some(false))
+        );
 
         // a quote inside an unquoted field next to real quoted fields
         let d = dialect_of("a,b\n\"x,1\",5\" pipe\n\"y\",3\n");
-        assert_eq!((d.quote_style, d.quotes_in_unquoted_fields), (Some(QuoteStyle::Strict), Some(true)));
+        assert_eq!(
+            (d.quote_style, d.quotes_in_unquoted_fields),
+            (Some(QuoteStyle::Strict), Some(true))
+        );
 
         // text after a closing quote only parses if quotes toggle
         let d = dialect_of("a,b\n\"x,1\" and more,2\n\"y\",3\n");
         assert_eq!(d.quote_style, Some(QuoteStyle::Toggle));
 
         // apostrophes and inch marks in a file that quotes nothing
-        assert_eq!(dialect_of("a,b\ndon't,5\" pipe\nwon't,6\" pipe\n").quote, None);
+        assert_eq!(
+            dialect_of("a,b\ndon't,5\" pipe\nwon't,6\" pipe\n").quote,
+            None
+        );
     }
 
     #[test]
@@ -1087,19 +1184,29 @@ mod tests {
         assert_eq!((d.escape, d.double_quote_escape), (None, true));
 
         let d = dialect_of("a,b\n\"say \\\"hi\\\", you\",2\n\"y\",3\n");
-        assert_eq!((d.escape, d.escape_in_unquoted_fields, d.double_quote_escape), (Some(Byte(b'\\')), false, false));
+        assert_eq!(
+            (d.escape, d.escape_in_unquoted_fields, d.double_quote_escape),
+            (Some(Byte(b'\\')), false, false)
+        );
     }
 
     #[test]
     fn comment_lines() {
-        assert_eq!(dialect_of("# made by a tool\na,b\n1,2\n3,4\n").comment, Some(Byte(b'#')));
+        assert_eq!(
+            dialect_of("# made by a tool\na,b\n1,2\n3,4\n").comment,
+            Some(Byte(b'#'))
+        );
         // a header that happens to start with `#` is a record
         assert_eq!(dialect_of("#id,name\n1,x\n2,y\n").comment, None);
     }
 
     #[test]
     fn counts() {
-        let (_, seen) = sniff(b"a,b\r\n\"x,1\",22\r\n\r\ny,\"q\"\"q\"\r\nshort\r\n", true, 0);
+        let (_, seen) = sniff(
+            b"a,b\r\n\"x,1\",22\r\n\r\ny,\"q\"\"q\"\r\nshort\r\n",
+            true,
+            0,
+        );
         let report = seen.report();
         assert_eq!(report["records"], 4);
         assert_eq!(report["fields"], 7);

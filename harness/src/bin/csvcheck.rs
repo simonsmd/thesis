@@ -50,10 +50,20 @@ fn main() -> Result<ExitCode, String> {
     let selection = args.inputs.resolve()?;
     let parsers = parsers::select(&args.parser, &args.exclude)?;
     let reference = parsers::reference();
-    let options: Vec<Options> = args.capacity.iter().map(|c| Options { capacity: c.0 as usize, fields: None }).collect();
+    let options: Vec<Options> = args
+        .capacity
+        .iter()
+        .map(|c| Options {
+            capacity: c.0 as usize,
+            fields: None,
+        })
+        .collect();
 
     if let Some(jobs) = args.jobs {
-        rayon::ThreadPoolBuilder::new().num_threads(jobs).build_global().map_err(|e| e.to_string())?;
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(jobs)
+            .build_global()
+            .map_err(|e| e.to_string())?;
     }
     for skipped in &selection.skipped {
         println!("skipped {}: {}", skipped.id, skipped.reason);
@@ -96,10 +106,16 @@ fn main() -> Result<ExitCode, String> {
     }
     let unreadable = reports.iter().filter(|(_, r)| r.is_err()).count();
 
-    println!("\n{:<40} {:>8} {:>9} {:>12}", "parser", "agree", "mismatch", "unsupported");
+    println!(
+        "\n{:<40} {:>8} {:>9} {:>12}",
+        "parser", "agree", "mismatch", "unsupported"
+    );
     for parser in &parsers {
         if let Some([agree, mismatch, unsupported]) = counts.get(parser.name) {
-            println!("{:<40} {agree:>8} {mismatch:>9} {unsupported:>12}", parser.name);
+            println!(
+                "{:<40} {agree:>8} {mismatch:>9} {unsupported:>12}",
+                parser.name
+            );
         }
     }
     println!(
@@ -131,15 +147,36 @@ fn main() -> Result<ExitCode, String> {
         serde_json::to_writer_pretty(file, &value).map_err(|e| e.to_string())?;
     }
 
-    Ok(if mismatched_files > 0 || unreadable > 0 { ExitCode::FAILURE } else { ExitCode::SUCCESS })
+    Ok(if mismatched_files > 0 || unreadable > 0 {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    })
 }
 
-fn check_file(input: &Input, reference: &parsers::Parser, parsers: &[parsers::Parser], options: &[Options]) -> Result<Report, String> {
+fn check_file(
+    input: &Input,
+    reference: &parsers::Parser,
+    parsers: &[parsers::Parser],
+    options: &[Options],
+) -> Result<Report, String> {
     let data = input.map()?;
-    Ok(check::check(reference, parsers, &input.dialect, &data, options))
+    Ok(check::check(
+        reference,
+        parsers,
+        &input.dialect,
+        &data,
+        options,
+    ))
 }
 
-fn render(n: usize, total: usize, input: &Input, report: &Result<Report, String>, verbose: bool) -> String {
+fn render(
+    n: usize,
+    total: usize,
+    input: &Input,
+    report: &Result<Report, String>,
+    verbose: bool,
+) -> String {
     let head = format!("[{n}/{total}] {} {}", input.label(), Size(input.size));
     let report = match report {
         Ok(report) => report,
@@ -147,16 +184,30 @@ fn render(n: usize, total: usize, input: &Input, report: &Result<Report, String>
     };
     let mismatches: Vec<_> = report.mismatches().collect();
     if mismatches.is_empty() {
-        return if verbose { format!("{head}: ok\n") } else { String::new() };
+        return if verbose {
+            format!("{head}: ok\n")
+        } else {
+            String::new()
+        };
     }
 
-    let mut out = format!("{head}: {} mismatches\n  dialect: {}\n  path: {}\n", mismatches.len(), input.dialect, input.path.display());
+    let mut out = format!(
+        "{head}: {} mismatches\n  dialect: {}\n  path: {}\n",
+        mismatches.len(),
+        input.dialect,
+        input.path.display()
+    );
     if let Some(error) = report.reference.error {
         out += &format!("  reference stops with {error}\n");
     }
     for o in mismatches {
         if let Verdict::Mismatch { difference, .. } = &o.verdict {
-            out += &format!("  {} (capacity {}): {}\n", o.parser, o.options.capacity, difference.replace('\n', "\n    "));
+            out += &format!(
+                "  {} (capacity {}): {}\n",
+                o.parser,
+                o.options.capacity,
+                difference.replace('\n', "\n    ")
+            );
         }
     }
     out

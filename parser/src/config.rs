@@ -56,7 +56,11 @@ pub enum ConfigError {
     /// A structural byte is not ASCII.
     NotAscii { setting: &'static str, byte: u8 },
     /// Two settings use the same byte.
-    Conflict { first: &'static str, second: &'static str, byte: u8 },
+    Conflict {
+        first: &'static str,
+        second: &'static str,
+        byte: u8,
+    },
 }
 
 impl std::fmt::Display for ConfigError {
@@ -65,7 +69,11 @@ impl std::fmt::Display for ConfigError {
             Self::NotAscii { setting, byte } => {
                 write!(f, "{setting} must be an ASCII byte, got 0x{byte:02x}")
             }
-            Self::Conflict { first, second, byte } => {
+            Self::Conflict {
+                first,
+                second,
+                byte,
+            } => {
                 write!(f, "{first} and {second} are both '{}'", byte.escape_ascii())
             }
         }
@@ -97,7 +105,9 @@ impl Config {
 
     /// A builder starting from the default dialect.
     pub fn builder() -> ConfigBuilder {
-        ConfigBuilder { config: Self::default() }
+        ConfigBuilder {
+            config: Self::default(),
+        }
     }
 }
 
@@ -171,14 +181,20 @@ impl ConfigBuilder {
             ("escape", config.escape),
             ("comment", config.comment),
         ];
-        let bytes = bytes.iter().filter_map(|(setting, byte)| byte.map(|b| (*setting, b)));
+        let bytes = bytes
+            .iter()
+            .filter_map(|(setting, byte)| byte.map(|b| (*setting, b)));
 
         for (i, (setting, byte)) in bytes.clone().enumerate() {
             if !byte.is_ascii() {
                 return Err(ConfigError::NotAscii { setting, byte });
             }
             if let Some((first, _)) = bytes.clone().take(i).find(|(_, earlier)| *earlier == byte) {
-                return Err(ConfigError::Conflict { first, second: setting, byte });
+                return Err(ConfigError::Conflict {
+                    first,
+                    second: setting,
+                    byte,
+                });
             }
         }
         Ok(config)
@@ -192,18 +208,36 @@ mod tests {
     #[test]
     fn accepts_the_default() {
         assert_eq!(Config::builder().build().map(|_| ()), Ok(()));
-        assert_eq!(Config::builder().delimiter(0).quote(None).escape(None).comment(None).build().map(|_| ()), Ok(()));
+        assert_eq!(
+            Config::builder()
+                .delimiter(0)
+                .quote(None)
+                .escape(None)
+                .comment(None)
+                .build()
+                .map(|_| ()),
+            Ok(())
+        );
     }
 
     #[test]
     fn rejects_non_ascii_bytes() {
         assert_eq!(
             Config::builder().delimiter(0xa7).build().map(|_| ()),
-            Err(ConfigError::NotAscii { setting: "delimiter", byte: 0xa7 }),
+            Err(ConfigError::NotAscii {
+                setting: "delimiter",
+                byte: 0xa7
+            }),
         );
         assert_eq!(
-            Config::builder().terminator(RecordTerminator::Byte(0x80)).build().map(|_| ()),
-            Err(ConfigError::NotAscii { setting: "terminator", byte: 0x80 }),
+            Config::builder()
+                .terminator(RecordTerminator::Byte(0x80))
+                .build()
+                .map(|_| ()),
+            Err(ConfigError::NotAscii {
+                setting: "terminator",
+                byte: 0x80
+            }),
         );
         assert!(Config::builder().quote(Some(0xff)).build().is_err());
         assert!(Config::builder().escape(Some(0xff)).build().is_err());
@@ -214,15 +248,35 @@ mod tests {
     fn rejects_conflicting_bytes() {
         assert_eq!(
             Config::builder().delimiter(b'"').build().map(|_| ()),
-            Err(ConfigError::Conflict { first: "delimiter", second: "quote", byte: b'"' }),
+            Err(ConfigError::Conflict {
+                first: "delimiter",
+                second: "quote",
+                byte: b'"'
+            }),
         );
         assert_eq!(
             Config::builder().comment(Some(b'\n')).build().map(|_| ()),
-            Err(ConfigError::Conflict { first: "terminator", second: "comment", byte: b'\n' }),
+            Err(ConfigError::Conflict {
+                first: "terminator",
+                second: "comment",
+                byte: b'\n'
+            }),
         );
         assert!(Config::builder().escape(Some(b'"')).build().is_err());
-        assert!(Config::builder().terminator(RecordTerminator::Byte(b',')).build().is_err());
+        assert!(
+            Config::builder()
+                .terminator(RecordTerminator::Byte(b','))
+                .build()
+                .is_err()
+        );
         // a disabled setting cannot conflict
-        assert_eq!(Config::builder().delimiter(b'#').comment(None).build().map(|_| ()), Ok(()));
+        assert_eq!(
+            Config::builder()
+                .delimiter(b'#')
+                .comment(None)
+                .build()
+                .map(|_| ()),
+            Ok(())
+        );
     }
 }

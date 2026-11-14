@@ -1,4 +1,8 @@
-use crate::{config::Config, dfa::Dfa, reference::{State, transition_next_state}};
+use crate::{
+    config::Config,
+    dfa::Dfa,
+    reference::{State, transition_next_state},
+};
 
 pub struct BitshiftDfa {
     table: [u64; 256],
@@ -56,7 +60,8 @@ impl BitshiftDfa {
             let mut row: u64 = 0;
 
             for state in STATES {
-                row |= state_to_offset(transition_next_state(config, state, b).0) << state_to_offset(state);
+                row |= state_to_offset(transition_next_state(config, state, b).0)
+                    << state_to_offset(state);
             }
 
             self.table[b as usize] = row;
@@ -70,16 +75,17 @@ impl Dfa for BitshiftDfa {
     type State = (u64, u64);
 
     fn new(config: &Config) -> Self {
-        let mut dfa = Self {
-            table: [0; 256],
-        };
+        let mut dfa = Self { table: [0; 256] };
         dfa.build_transition_table(config);
         dfa
     }
 
     #[inline(always)]
     fn start_state(&self) -> Self::State {
-        (state_to_offset(State::StartRecord), state_to_offset(State::StartRecord))
+        (
+            state_to_offset(State::StartRecord),
+            state_to_offset(State::StartRecord),
+        )
     }
 
     #[inline(always)]
@@ -115,11 +121,13 @@ impl Dfa for BitshiftDfa {
 
     #[inline(always)]
     fn in_quoted_field(&self, (_, state): Self::State) -> bool {
-        state == state_to_offset(State::InQuotedFieldOutput) || state == state_to_offset(State::InQuotedFieldDiscard)
+        state == state_to_offset(State::InQuotedFieldOutput)
+            || state == state_to_offset(State::InQuotedFieldDiscard)
     }
 
     #[inline(always)]
     fn in_escape_sequence(&self, (_, state): Self::State) -> bool {
-        state == state_to_offset(State::EscapeSequenceInField) || state == state_to_offset(State::EscapeSequenceInQuotedField)
+        state == state_to_offset(State::EscapeSequenceInField)
+            || state == state_to_offset(State::EscapeSequenceInQuotedField)
     }
 }

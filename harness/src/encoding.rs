@@ -56,7 +56,10 @@ pub fn to_utf8(data: &[u8], encoding: Option<&str>) -> Result<Option<Vec<u8>>, S
         return Ok(None);
     };
     let name = encoding.trim().to_ascii_lowercase().replace('_', "-");
-    if matches!(name.as_str(), "ascii" | "us-ascii" | "utf-8" | "utf8" | "utf-8-sig") {
+    if matches!(
+        name.as_str(),
+        "ascii" | "us-ascii" | "utf-8" | "utf8" | "utf-8-sig"
+    ) {
         return Ok(None);
     }
     if let Some(big_endian) = match name.as_str() {
@@ -67,7 +70,10 @@ pub fn to_utf8(data: &[u8], encoding: Option<&str>) -> Result<Option<Vec<u8>>, S
         return Ok(Some(utf32_to_utf8(data, big_endian)));
     }
 
-    let label = ALIASES.iter().find(|(python, _)| *python == name).map_or(name.as_str(), |(_, label)| label);
+    let label = ALIASES
+        .iter()
+        .find(|(python, _)| *python == name)
+        .map_or(name.as_str(), |(_, label)| label);
     // `cp1252` is `windows-1252`, `iso8859-15` is `iso-8859-15`
     let label = match (label.strip_prefix("cp125"), label.strip_prefix("iso8859-")) {
         (Some(n), _) => format!("windows-125{n}"),
@@ -80,8 +86,15 @@ pub fn to_utf8(data: &[u8], encoding: Option<&str>) -> Result<Option<Vec<u8>>, S
         let (text, _, _) = decoder.decode(data);
         return Ok(Some(text.into_owned().into_bytes()));
     }
-    if SINGLE_BYTE_PREFIXES.iter().any(|prefix| name.starts_with(prefix)) {
-        return Ok(Some(encoding_rs::mem::decode_latin1(data).into_owned().into_bytes()));
+    if SINGLE_BYTE_PREFIXES
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
+    {
+        return Ok(Some(
+            encoding_rs::mem::decode_latin1(data)
+                .into_owned()
+                .into_bytes(),
+        ));
     }
     Err(format!("no decoder for encoding {encoding:?}"))
 }
@@ -141,7 +154,8 @@ impl Data {
     pub fn map(path: &Path, encoding: Option<&str>) -> Result<Self, String> {
         let file = fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
         // SAFETY: the input files are not modified while a harness binary runs
-        let map = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| format!("{}: {e}", path.display()))?;
+        let map =
+            unsafe { memmap2::Mmap::map(&file) }.map_err(|e| format!("{}: {e}", path.display()))?;
         let converted = to_utf8(&map, encoding).map_err(|e| format!("{}: {e}", path.display()))?;
         Ok(Self::new(converted.map_or(Bytes::Mapped(map), Bytes::Read)))
     }
@@ -178,7 +192,9 @@ mod tests {
     use super::*;
 
     fn convert(data: &[u8], encoding: &str) -> Vec<u8> {
-        to_utf8(data, Some(encoding)).unwrap().expect("should be converted")
+        to_utf8(data, Some(encoding))
+            .unwrap()
+            .expect("should be converted")
     }
 
     #[test]
@@ -192,7 +208,10 @@ mod tests {
     fn converts_python_codec_names() {
         assert_eq!(convert(b"a;\xe4\n", "cp1252"), "a;ä\n".as_bytes());
         assert_eq!(convert(b"a;\xa4\n", "iso8859_15"), "a;€\n".as_bytes());
-        assert_eq!(convert(b"\xff\xfea\x00,\x00\xe4\x00", "utf-16-le"), "a,ä".as_bytes());
+        assert_eq!(
+            convert(b"\xff\xfea\x00,\x00\xe4\x00", "utf-16-le"),
+            "a,ä".as_bytes()
+        );
         assert_eq!(convert(b"\x00a\x00,", "utf-16-be"), b"a,");
         assert_eq!(convert(b"a\x00\x00\x00,\x00\x00\x00", "utf-32-le"), b"a,");
         // the second byte of this Shift JIS character is `|`

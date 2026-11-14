@@ -161,7 +161,11 @@ fn list(args: ListArgs) -> Result<(), String> {
 }
 
 fn short(id: &str) -> &str {
-    if harness::dataset::is_content_hash(id) { &id[..10] } else { id }
+    if harness::dataset::is_content_hash(id) {
+        &id[..10]
+    } else {
+        id
+    }
 }
 
 /// Appends JSON lines and flushes after each group, so partial runs are usable.
@@ -183,7 +187,10 @@ impl Output {
 fn run(args: RunArgs) -> Result<(), String> {
     let selection = args.inputs.resolve()?;
     let parsers = parsers::select(&args.parsers.parser, &args.parsers.exclude)?;
-    let options = Options { capacity: args.capacity.0 as usize, fields: None };
+    let options = Options {
+        capacity: args.capacity.0 as usize,
+        fields: None,
+    };
     let min_sample_time = Duration::from_millis(args.min_sample_time);
 
     if let Some(cpu) = args.cpu {
@@ -192,7 +199,9 @@ fn run(args: RunArgs) -> Result<(), String> {
     let mut counters = if args.no_counters {
         None
     } else if args.cpu.is_none() && counters::is_hybrid() {
-        eprintln!("warning: hybrid CPU without --cpu: the counters would stop on the other core type, measuring time only");
+        eprintln!(
+            "warning: hybrid CPU without --cpu: the counters would stop on the other core type, measuring time only"
+        );
         None
     } else {
         match Counters::open(args.cpu) {
@@ -207,7 +216,12 @@ fn run(args: RunArgs) -> Result<(), String> {
     let label = if selection.datasets.is_empty() {
         "files".to_owned()
     } else {
-        selection.datasets.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join("+")
+        selection
+            .datasets
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .collect::<Vec<_>>()
+            .join("+")
     };
     let results_dir = Path::new(ROOT).join("bench-data");
     // loaded before running, so that a bad baseline does not surface only after the whole run
@@ -223,15 +237,16 @@ fn run(args: RunArgs) -> Result<(), String> {
             Some((path, medians))
         }
     };
-    let path = args
-        .output
-        .clone()
-        .unwrap_or_else(|| results_dir.join(format!("{label}-{}.jsonl", system::compact_timestamp())));
+    let path = args.output.clone().unwrap_or_else(|| {
+        results_dir.join(format!("{label}-{}.jsonl", system::compact_timestamp()))
+    });
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
     let file = File::create_new(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let mut out = Output { out: BufWriter::new(file) };
+    let mut out = Output {
+        out: BufWriter::new(file),
+    };
 
     let build = system::build();
     if build.git_dirty {
@@ -302,7 +317,12 @@ fn run(args: RunArgs) -> Result<(), String> {
 
         // Expected parsing result. Set by the first parser
         let mut expected: Option<(&str, Statistics)> = None;
-        let mut file_problems = Problems { input, ours_run: 0, errors: Vec::new(), disagreements: Vec::new() };
+        let mut file_problems = Problems {
+            input,
+            ours_run: 0,
+            errors: Vec::new(),
+            disagreements: Vec::new(),
+        };
 
         for parser in &parsers {
             let result = |status: &str| json!({"type": "result", "file": input.id, "parser": parser.name, "status": status});
@@ -315,14 +335,24 @@ fn run(args: RunArgs) -> Result<(), String> {
             }
 
             file_problems.ours_run += parser.is_ours() as usize;
-            let measured = measure(parser, input, data, &options, &args, min_sample_time, counters.as_mut())?;
+            let measured = measure(
+                parser,
+                input,
+                data,
+                &options,
+                &args,
+                min_sample_time,
+                counters.as_mut(),
+            )?;
             let (statistics, iterations, samples) = match measured {
                 Ok(m) => m,
                 Err(error) => {
                     eprintln!("    {:<40} {error}", parser.name);
                     match file_problems.errors.iter_mut().find(|(e, _)| *e == error) {
                         Some((_, parsers)) => parsers.push(parser.name),
-                        None => file_problems.errors.push((error.clone(), vec![parser.name])),
+                        None => file_problems
+                            .errors
+                            .push((error.clone(), vec![parser.name])),
                     }
                     let mut r = result("error");
                     r["error"] = json!(error);
@@ -339,10 +369,14 @@ fn run(args: RunArgs) -> Result<(), String> {
                 match expected {
                     None => expected = Some((parser.name, statistics)),
                     Some((name, stats)) if stats != statistics => {
-                        eprintln!("    warning: {} disagrees with {name}: {statistics:?} vs {stats:?}", parser.name);
-                        file_problems
-                            .disagreements
-                            .push(format!("{} vs {name}: {statistics:?} vs {stats:?}", parser.name));
+                        eprintln!(
+                            "    warning: {} disagrees with {name}: {statistics:?} vs {stats:?}",
+                            parser.name
+                        );
+                        file_problems.disagreements.push(format!(
+                            "{} vs {name}: {statistics:?} vs {stats:?}",
+                            parser.name
+                        ));
                         r["disagrees_with"] = json!(name);
                     }
                     Some(_) => {}
@@ -372,7 +406,10 @@ fn run(args: RunArgs) -> Result<(), String> {
 
             let cycles_per_byte: Vec<f64> = samples
                 .iter()
-                .filter_map(|s| s.reading.map(|r| r.cycles as f64 / (data.len() as f64 * iterations as f64)))
+                .filter_map(|s| {
+                    s.reading
+                        .map(|r| r.cycles as f64 / (data.len() as f64 * iterations as f64))
+                })
                 .collect();
             let summary = Summary {
                 throughput: median(&mut throughputs),
@@ -383,7 +420,12 @@ fn run(args: RunArgs) -> Result<(), String> {
                 let cpb = summary.cycles_per_byte.map_or(String::new(), |c| {
                     format!("  {:.3} c/B ({:.3}-{:.3})", c.mean, c.min, c.max)
                 });
-                eprintln!("    {:<40} {:>7.3} GB/s ±{:.1}%{cpb}", parser.name, summary.throughput, summary.cv * 100.0);
+                eprintln!(
+                    "    {:<40} {:>7.3} GB/s ±{:.1}%{cpb}",
+                    parser.name,
+                    summary.throughput,
+                    summary.cv * 100.0
+                );
             }
             summaries.entry(parser.name).or_default().push(summary);
         }
@@ -400,10 +442,15 @@ fn run(args: RunArgs) -> Result<(), String> {
         "parser", "files", "GB/s (geo)", "median CV", "c/B (geo)", "c/B min", "c/B max"
     );
     for parser in &parsers {
-        let Some(results) = summaries.get(parser.name) else { continue };
+        let Some(results) = summaries.get(parser.name) else {
+            continue;
+        };
         let throughputs: Vec<f64> = results.iter().map(|s| s.throughput).collect();
         let mut cvs: Vec<f64> = results.iter().map(|s| s.cv).collect();
-        let per_file: Vec<f64> = results.iter().filter_map(|s| s.cycles_per_byte.map(|c| c.mean)).collect();
+        let per_file: Vec<f64> = results
+            .iter()
+            .filter_map(|s| s.cycles_per_byte.map(|c| c.mean))
+            .collect();
         let cpb = match Range::of(&per_file) {
             Some(c) => format!(" {:>9.3} {:>8.3} {:>8.3}", geomean(&per_file), c.min, c.max),
             None => String::new(),
@@ -463,18 +510,29 @@ fn latest_result(dir: &Path, label: &str) -> Result<PathBuf, String> {
         date.len() == 8
             && time.len() == 7
             && time.starts_with('-')
-            && date.bytes().chain(time.bytes().skip(1)).all(|b| b.is_ascii_digit())
+            && date
+                .bytes()
+                .chain(time.bytes().skip(1))
+                .all(|b| b.is_ascii_digit())
     };
     entries
         .filter_map(|e| e.ok()?.file_name().into_string().ok())
         .filter(|name| {
-            let time = name.strip_prefix(label).and_then(|n| n.strip_prefix('-')).and_then(|n| n.strip_suffix(".jsonl"));
+            let time = name
+                .strip_prefix(label)
+                .and_then(|n| n.strip_prefix('-'))
+                .and_then(|n| n.strip_suffix(".jsonl"));
             time.is_some_and(is_timestamp)
         })
         // the timestamps sort in time order
         .max()
         .map(|name| dir.join(name))
-        .ok_or_else(|| format!("no previous `{label}` result in {} to compare to", dir.display()))
+        .ok_or_else(|| {
+            format!(
+                "no previous `{label}` result in {} to compare to",
+                dir.display()
+            )
+        })
 }
 
 /// One parser on one file: its statistics, the iterations per sample and the samples; or the
@@ -596,7 +654,11 @@ fn median(values: &mut [f64]) -> f64 {
     }
     values.sort_by(f64::total_cmp);
     let mid = values.len() / 2;
-    if values.len().is_multiple_of(2) { (values[mid - 1] + values[mid]) / 2.0 } else { values[mid] }
+    if values.len().is_multiple_of(2) {
+        (values[mid - 1] + values[mid]) / 2.0
+    } else {
+        values[mid]
+    }
 }
 
 /// Coefficient of variation: standard deviation over mean.
@@ -635,27 +697,44 @@ fn load_medians(path: &Path) -> Result<Medians, String> {
                 let size = sizes.get(&file).copied().unwrap_or(f64::NAN);
                 let bytes = size * value["iterations"].as_f64().unwrap_or(f64::NAN);
                 let throughput = bytes / value["ns"].as_f64().unwrap_or(f64::NAN);
-                throughputs.entry((file, str_field("parser"))).or_default().push(throughput);
+                throughputs
+                    .entry((file, str_field("parser")))
+                    .or_default()
+                    .push(throughput);
             }
             _ => {}
         }
     }
-    Ok(throughputs.into_iter().map(|(k, mut v)| (k, median(&mut v))).collect())
+    Ok(throughputs
+        .into_iter()
+        .map(|(k, mut v)| (k, median(&mut v)))
+        .collect())
 }
 
 fn compare(args: CompareArgs) -> Result<(), String> {
     let base = load_medians(&args.base)?;
     let new = load_medians(&args.new)?;
     let selected = |parser: &str| {
-        let included = args.parsers.parser.is_empty() || args.parsers.parser.iter().any(|g| parsers::glob(g, parser));
-        included && !args.parsers.exclude.iter().any(|g| parsers::glob(g, parser))
+        let included = args.parsers.parser.is_empty()
+            || args.parsers.parser.iter().any(|g| parsers::glob(g, parser));
+        included
+            && !args
+                .parsers
+                .exclude
+                .iter()
+                .any(|g| parsers::glob(g, parser))
     };
     print_comparison(&base, &new, selected, args.threshold)
 }
 
 /// The change from `base` to `new` per parser, then the files that changed by more than
 /// `threshold` percent. Only parsers for which `selected` holds are compared.
-fn print_comparison(base: &Medians, new: &Medians, selected: impl Fn(&str) -> bool, threshold: f64) -> Result<(), String> {
+fn print_comparison(
+    base: &Medians,
+    new: &Medians,
+    selected: impl Fn(&str) -> bool,
+    threshold: f64,
+) -> Result<(), String> {
     // ratios new/base per parser, over the files both measured
     let mut ratios: HashMap<&str, Vec<(&str, f64)>> = HashMap::new();
     for ((file, parser), new_tp) in new {
@@ -663,7 +742,10 @@ fn print_comparison(base: &Medians, new: &Medians, selected: impl Fn(&str) -> bo
             continue;
         }
         if let Some(base_tp) = base.get(&(file.clone(), parser.clone())) {
-            ratios.entry(parser).or_default().push((file, new_tp / base_tp));
+            ratios
+                .entry(parser)
+                .or_default()
+                .push((file, new_tp / base_tp));
         }
     }
     if ratios.is_empty() {
@@ -672,7 +754,10 @@ fn print_comparison(base: &Medians, new: &Medians, selected: impl Fn(&str) -> bo
 
     let mut names: Vec<&str> = ratios.keys().copied().collect();
     names.sort();
-    println!("{:<40} {:>6} {:>10} {:>9} {:>9}", "parser", "files", "geo mean", "min", "max");
+    println!(
+        "{:<40} {:>6} {:>10} {:>9} {:>9}",
+        "parser", "files", "geo mean", "min", "max"
+    );
     for name in &names {
         let r = &ratios[name];
         let geomean = geomean(&r.iter().map(|(_, x)| *x).collect::<Vec<_>>());
@@ -697,7 +782,12 @@ fn print_comparison(base: &Medians, new: &Medians, selected: impl Fn(&str) -> bo
         changed.sort_by(|a, b| a.2.total_cmp(&b.2));
         println!("\nchanged by more than {threshold}%:");
         for (parser, file, r) in changed {
-            println!("  {:>+8.2}%  {:<40} {}", (r - 1.0) * 100.0, parser, short(file));
+            println!(
+                "  {:>+8.2}%  {:<40} {}",
+                (r - 1.0) * 100.0,
+                parser,
+                short(file)
+            );
         }
     }
     Ok(())

@@ -56,7 +56,10 @@ impl Encoding {
     /// The encoding to convert the file from, strongest evidence first. `None` if nothing names
     /// one.
     pub fn name(&self) -> Option<&str> {
-        self.bom.as_deref().or(self.wide.as_deref()).or(self.detected.as_deref())
+        self.bom
+            .as_deref()
+            .or(self.wide.as_deref())
+            .or(self.detected.as_deref())
     }
 }
 
@@ -111,7 +114,10 @@ impl Store {
     pub fn open(datasets_dir: &Path, corpus: &Path) -> Result<Self, String> {
         let path = datasets_dir.join("overrides.toml");
         let (overrides, overrides_hash) = match fs::read(&path) {
-            Ok(bytes) => (parse_overrides(&bytes).map_err(|e| format!("{}: {e}", path.display()))?, hash(&bytes)),
+            Ok(bytes) => (
+                parse_overrides(&bytes).map_err(|e| format!("{}: {e}", path.display()))?,
+                hash(&bytes),
+            ),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => (HashMap::new(), String::new()),
             Err(e) => return Err(format!("{}: {e}", path.display())),
         };
@@ -158,7 +164,11 @@ impl Store {
     }
 
     /// The dialect of a file in the dataset: its override if there is one, else the sniffed one.
-    pub fn dialect(&self, hash: &str, entry: &FileEntry) -> Result<(Dialect, DialectSource), String> {
+    pub fn dialect(
+        &self,
+        hash: &str,
+        entry: &FileEntry,
+    ) -> Result<(Dialect, DialectSource), String> {
         match self.overrides.get(hash) {
             Some(o) => Ok((o.dialect.clone(), DialectSource::Override)),
             None => entry.sniffed_dialect().map(|d| (d, DialectSource::Sniffed)),
@@ -209,7 +219,9 @@ pub fn parse_overrides(bytes: &[u8]) -> Result<HashMap<String, Override>, String
             // `Dialect` denies unknown keys, which catches misspelled fields
             let dialect = Dialect::deserialize(toml::Value::Table(entry))
                 .map_err(|e| format!("files.{hash}: {e}"))?;
-            dialect.validate().map_err(|e| format!("files.{hash}: {e}"))?;
+            dialect
+                .validate()
+                .map_err(|e| format!("files.{hash}: {e}"))?;
             Ok((hash, Override { dialect, note }))
         })
         .collect()

@@ -180,7 +180,13 @@ impl fmt::Display for Dialect {
         fn opt(b: Option<Byte>) -> String {
             b.map_or("-".into(), |b| b.to_string())
         }
-        write!(f, "delim={} term={} quote={}", self.delimiter, self.terminator, opt(self.quote))?;
+        write!(
+            f,
+            "delim={} term={} quote={}",
+            self.delimiter,
+            self.terminator,
+            opt(self.quote)
+        )?;
         if self.quote.is_some() {
             match (self.quote_style, self.quotes_in_unquoted_fields) {
                 (Some(QuoteStyle::Toggle), _) => write!(f, " toggle")?,
@@ -263,15 +269,28 @@ mod tests {
 
     #[test]
     fn quote_needs_a_style() {
-        let dialect = Dialect { quote_style: None, ..Dialect::default() };
+        let dialect = Dialect {
+            quote_style: None,
+            ..Dialect::default()
+        };
         assert!(dialect.validate().is_err());
-        let dialect = Dialect { quote: None, quote_style: None, ..Dialect::default() };
+        let dialect = Dialect {
+            quote: None,
+            quote_style: None,
+            ..Dialect::default()
+        };
         assert!(dialect.validate().is_ok());
     }
 
     #[test]
     fn structural_bytes_must_differ() {
-        let dialect = Dialect { comment: Some(Byte(b',')), ..Dialect::default() };
-        assert_eq!(dialect.validate().unwrap_err(), "delimiter and comment are both ','");
+        let dialect = Dialect {
+            comment: Some(Byte(b',')),
+            ..Dialect::default()
+        };
+        assert_eq!(
+            dialect.validate().unwrap_err(),
+            "delimiter and comment are both ','"
+        );
     }
 }

@@ -30,8 +30,13 @@ impl Case {
                 2 => Terminator::Byte(Byte(b'\n')),
                 _ => Terminator::Byte(Byte(b'\r')),
             },
-            quote: [None, Some(Byte(b'"')), Some(Byte(b'"')), Some(Byte(b'\''))][(d0 as usize >> 4) & 3],
-            quote_style: Some(if d0 & 0x40 == 0 { QuoteStyle::Strict } else { QuoteStyle::Toggle }),
+            quote: [None, Some(Byte(b'"')), Some(Byte(b'"')), Some(Byte(b'\''))]
+                [(d0 as usize >> 4) & 3],
+            quote_style: Some(if d0 & 0x40 == 0 {
+                QuoteStyle::Strict
+            } else {
+                QuoteStyle::Toggle
+            }),
             quotes_in_unquoted_fields: Some(d0 & 0x80 != 0),
             escape: (d1 & 1 != 0).then_some(Byte(b'\\')),
             escape_in_unquoted_fields: d1 & 2 != 0,
@@ -45,9 +50,19 @@ impl Case {
         };
         let data = raw
             .iter()
-            .map(|&b| if b < 0x80 { ALPHABET[b as usize % ALPHABET.len()] } else { b })
+            .map(|&b| {
+                if b < 0x80 {
+                    ALPHABET[b as usize % ALPHABET.len()]
+                } else {
+                    b
+                }
+            })
             .collect();
-        Some(Case { dialect, options, data })
+        Some(Case {
+            dialect,
+            options,
+            data,
+        })
     }
 
     /// Check `parsers` against the reference: ours must agree exactly. rust-csv is compared only
@@ -58,12 +73,20 @@ impl Case {
     ///   reference but always at `\n` in rust-csv, and an unterminated comment line at the end of the input
     ///   is an extra empty record in rust-csv
     pub fn check(&self, reference: &Parser, parsers: &[Parser]) -> Result<(), String> {
-        let report = check::check(reference, parsers, &self.dialect, &self.data, &[self.options]);
+        let report = check::check(
+            reference,
+            parsers,
+            &self.dialect,
+            &self.data,
+            &[self.options],
+        );
         let failures: Vec<String> = report
             .unexpected_mismatches()
             .filter(|o| o.ours || self.dialect.comment.is_none())
             .map(|o| match &o.verdict {
-                check::Verdict::Mismatch { difference, .. } => format!("{} ({:?}): {difference}", o.parser, o.options),
+                check::Verdict::Mismatch { difference, .. } => {
+                    format!("{} ({:?}): {difference}", o.parser, o.options)
+                }
                 _ => unreachable!(),
             })
             .collect();

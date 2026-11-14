@@ -54,10 +54,26 @@ macro_rules! static_simd {
     };
 }
 
-static_simd!(any(target_arch = "x86", target_arch = "x86_64"), Sse2, as_sse2);
-static_simd!(any(target_arch = "x86", target_arch = "x86_64"), Sse4_2, as_sse4_2);
-static_simd!(any(target_arch = "x86", target_arch = "x86_64"), Avx2, as_avx2);
-static_simd!(any(target_arch = "x86", target_arch = "x86_64"), Avx512, as_avx512);
+static_simd!(
+    any(target_arch = "x86", target_arch = "x86_64"),
+    Sse2,
+    as_sse2
+);
+static_simd!(
+    any(target_arch = "x86", target_arch = "x86_64"),
+    Sse4_2,
+    as_sse4_2
+);
+static_simd!(
+    any(target_arch = "x86", target_arch = "x86_64"),
+    Avx2,
+    as_avx2
+);
+static_simd!(
+    any(target_arch = "x86", target_arch = "x86_64"),
+    Avx512,
+    as_avx512
+);
 static_simd!(target_arch = "aarch64", Neon, as_neon);
 
 /// Select the best fearless_simd level for the target architecture at compile time
@@ -114,9 +130,7 @@ mod baseline {
 /// not name it. The associated type does, so a classifier needs a single impl for all widths.
 ///
 /// The vector is its own byte representation, so it can index the swizzles.
-pub trait ByteVector:
-    SimdInt<<Self as ByteVector>::Simd, Element = u8, ByteVector = Self>
-{
+pub trait ByteVector: SimdInt<<Self as ByteVector>::Simd, Element = u8, ByteVector = Self> {
     /// The level of the vector.
     type Simd: StaticSimd;
 }
@@ -364,7 +378,10 @@ mod tests {
     /// The bitmask of `classify` over `block`, one vector at a time.
     ///
     /// Also checks that `any_true` agrees with the bitmask of each vector.
-    fn bitmask<C: Classifier>(block: &[u8; BLOCK], classify: impl Fn(C::Vector) -> Mask<C::Vector>) -> u64 {
+    fn bitmask<C: Classifier>(
+        block: &[u8; BLOCK],
+        classify: impl Fn(C::Vector) -> Mask<C::Vector>,
+    ) -> u64 {
         let mut mask = 0;
         for (i, chunk) in block.chunks_exact(C::LEN).enumerate() {
             let lanes = classify(C::load(chunk));
@@ -379,8 +396,20 @@ mod tests {
     fn configs_with_zero() -> Vec<Config> {
         let mut configs = configs();
         configs.push(Config::builder().delimiter(0).build().unwrap());
-        configs.push(Config::builder().quote(Some(0)).escape(Some(b'\\')).build().unwrap());
-        configs.push(Config::builder().quote(Some(0)).escape(None).build().unwrap());
+        configs.push(
+            Config::builder()
+                .quote(Some(0))
+                .escape(Some(b'\\'))
+                .build()
+                .unwrap(),
+        );
+        configs.push(
+            Config::builder()
+                .quote(Some(0))
+                .escape(None)
+                .build()
+                .unwrap(),
+        );
         configs
     }
 
@@ -409,16 +438,23 @@ mod tests {
             let in_field = structural_bytes_in_field(&config);
             let in_quoted_field = structural_bytes_in_quoted_field(&config);
             for block in blocks_with_zero() {
-                let check = |set: &str, needles: &[u8], classify: &dyn Fn(C::Vector) -> Mask<C::Vector>| {
-                    let actual = bitmask::<C>(&block, classify);
-                    let expected = scalar_mask(needles, &block);
-                    assert_eq!(actual, expected, "{set} in {block:?} with {config:?}");
-                };
+                let check =
+                    |set: &str, needles: &[u8], classify: &dyn Fn(C::Vector) -> Mask<C::Vector>| {
+                        let actual = bitmask::<C>(&block, classify);
+                        let expected = scalar_mask(needles, &block);
+                        assert_eq!(actual, expected, "{set} in {block:?} with {config:?}");
+                    };
                 check("structural", &structural, &|v| classifier.structural(v));
                 check("in field", &in_field, &|v| classifier.in_field(v));
-                check("in quoted field", &in_quoted_field, &|v| classifier.in_quoted_field(v));
-                check("per state in field", &in_field, &|v| classifier.per_state(v)[0]);
-                check("per state in quoted field", &in_quoted_field, &|v| classifier.per_state(v)[1]);
+                check("in quoted field", &in_quoted_field, &|v| {
+                    classifier.in_quoted_field(v)
+                });
+                check("per state in field", &in_field, &|v| {
+                    classifier.per_state(v)[0]
+                });
+                check("per state in quoted field", &in_quoted_field, &|v| {
+                    classifier.per_state(v)[1]
+                });
             }
         }
     }
@@ -445,7 +481,10 @@ mod tests {
         agrees_with_scalar::<NibbleMap<u8x64<fearless_simd::Sse2>>>();
     }
 
-    #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), target_feature = "sse4.2"))]
+    #[cfg(all(
+        any(target_arch = "x86", target_arch = "x86_64"),
+        target_feature = "sse4.2"
+    ))]
     #[test]
     fn nibble_map_agrees_with_scalar_on_sse4_2() {
         agrees_with_scalar::<NibbleMap<u8x16<fearless_simd::Sse4_2>>>();
@@ -453,7 +492,10 @@ mod tests {
     }
 
     // for when Native is AVX-512, which has its own instructions for all of these
-    #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), target_feature = "avx2"))]
+    #[cfg(all(
+        any(target_arch = "x86", target_arch = "x86_64"),
+        target_feature = "avx2"
+    ))]
     #[test]
     fn agrees_with_scalar_on_avx2() {
         agrees_with_scalar::<CmpOr<u8x64<fearless_simd::Avx2>>>();
@@ -462,7 +504,10 @@ mod tests {
         agrees_with_scalar::<Pcmpistr<u8x64<fearless_simd::Avx2>>>();
     }
 
-    #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), target_feature = "sse4.2"))]
+    #[cfg(all(
+        any(target_arch = "x86", target_arch = "x86_64"),
+        target_feature = "sse4.2"
+    ))]
     #[test]
     fn pcmpistr_agrees_with_scalar() {
         agrees_with_scalar::<Pcmpistr<u8x16<fearless_simd::Sse4_2>>>();
@@ -470,7 +515,10 @@ mod tests {
         agrees_with_scalar::<Pcmpistr<u8x64<fearless_simd::Sse4_2>>>();
     }
 
-    #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), target_feature = "avx2"))]
+    #[cfg(all(
+        any(target_arch = "x86", target_arch = "x86_64"),
+        target_feature = "avx2"
+    ))]
     #[test]
     fn pcmpistr_agrees_with_scalar_on_native() {
         agrees_with_scalar::<Pcmpistr<u8x16<Native>>>();
@@ -478,7 +526,10 @@ mod tests {
         agrees_with_scalar::<Pcmpistr<u8x64<Native>>>();
     }
 
-    #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), target_feature = "sse4.2"))]
+    #[cfg(all(
+        any(target_arch = "x86", target_arch = "x86_64"),
+        target_feature = "sse4.2"
+    ))]
     #[test]
     fn pcmpestr_agrees_with_scalar() {
         agrees_with_scalar::<Pcmpestr<u8x16<fearless_simd::Sse4_2>>>();
@@ -486,7 +537,10 @@ mod tests {
         agrees_with_scalar::<Pcmpestr<u8x64<fearless_simd::Sse4_2>>>();
     }
 
-    #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), target_feature = "avx2"))]
+    #[cfg(all(
+        any(target_arch = "x86", target_arch = "x86_64"),
+        target_feature = "avx2"
+    ))]
     #[test]
     fn pcmpestr_agrees_with_scalar_on_native() {
         agrees_with_scalar::<Pcmpestr<u8x16<Native>>>();

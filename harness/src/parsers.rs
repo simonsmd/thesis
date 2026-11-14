@@ -11,17 +11,22 @@
 
 use std::fmt;
 
+#[cfg(all(
+    any(target_arch = "x86", target_arch = "x86_64"),
+    target_feature = "avx2"
+))]
+use csv_parser::classifier::{Pcmpestr, Pcmpistr};
 use csv_parser::{
     bitshift::BitshiftDfa,
     class::ClassDfa,
-    dfa::Dfa,
-    parser::{CompactionParser, Error, PerState, Sets, Shared, ZeroCopyParser, compaction, zerocopy},
-    reference::ReferenceDfa,
     classifier::{Classifier, CmpOr, Native, NibbleMap, u8x16, u8x32, u8x64},
+    dfa::Dfa,
+    parser::{
+        CompactionParser, Error, PerState, Sets, Shared, ZeroCopyParser, compaction, zerocopy,
+    },
+    reference::ReferenceDfa,
     table::TableDfa,
 };
-#[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), target_feature = "avx2"))]
-use csv_parser::classifier::{Pcmpestr, Pcmpistr};
 use serde::Serialize;
 
 use crate::{check::Digest, dialect::Dialect, rust_csv};
@@ -71,7 +76,11 @@ pub struct ErrorAt {
 impl From<Error> for ErrorAt {
     fn from(error: Error) -> Self {
         match error {
-            Error::Parser(p) => ErrorAt { record: p.record, field: p.field, byte: p.byte },
+            Error::Parser(p) => ErrorAt {
+                record: p.record,
+                field: p.field,
+                byte: p.byte,
+            },
             // all input comes from memory
             Error::IO(e) => unreachable!("IO error reading from a slice: {e}"),
         }
@@ -80,7 +89,11 @@ impl From<Error> for ErrorAt {
 
 impl fmt::Display for ErrorAt {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "error at record {}, field {}, byte {}", self.record, self.field, self.byte)
+        write!(
+            f,
+            "error at record {}, field {}, byte {}",
+            self.record, self.field, self.byte
+        )
     }
 }
 
@@ -95,7 +108,10 @@ pub struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Self { capacity: csv_parser::DEFAULT_CAPACITY, fields: None }
+        Self {
+            capacity: csv_parser::DEFAULT_CAPACITY,
+            fields: None,
+        }
     }
 }
 
@@ -151,7 +167,11 @@ fn supports_all(_: &Dialect) -> Result<(), &'static str> {
     Ok(())
 }
 
-fn compaction<'a, D: Dfa>(d: &Dialect, input: &'a [u8], o: &Options) -> CompactionParser<&'a [u8], D> {
+fn compaction<'a, D: Dfa>(
+    d: &Dialect,
+    input: &'a [u8],
+    o: &Options,
+) -> CompactionParser<&'a [u8], D> {
     let fields = o.fields.unwrap_or(compaction::DEFAULT_FIELDS);
     CompactionParser::with_capacity(input, d.config(), o.capacity, fields)
 }
@@ -285,21 +305,120 @@ macro_rules! sets {
 macro_rules! classifiers {
     ($variant:literal, $prepare:ident, $pull:ident, $dfa:ty, $name:literal) => {{
         let mut entries = Vec::new();
-        entries.extend(sets!($variant, $prepare, $pull, $dfa, $name, "cmp-or-16", CmpOr<u8x16<Native>>));
-        entries.extend(sets!($variant, $prepare, $pull, $dfa, $name, "cmp-or-32", CmpOr<u8x32<Native>>));
-        entries.extend(sets!($variant, $prepare, $pull, $dfa, $name, "cmp-or-64", CmpOr<u8x64<Native>>));
-        entries.extend(sets!($variant, $prepare, $pull, $dfa, $name, "nibble-map-16", NibbleMap<u8x16<Native>>));
-        entries.extend(sets!($variant, $prepare, $pull, $dfa, $name, "nibble-map-32", NibbleMap<u8x32<Native>>));
-        entries.extend(sets!($variant, $prepare, $pull, $dfa, $name, "nibble-map-64", NibbleMap<u8x64<Native>>));
+        entries.extend(sets!(
+            $variant,
+            $prepare,
+            $pull,
+            $dfa,
+            $name,
+            "cmp-or-16",
+            CmpOr<u8x16<Native>>
+        ));
+        entries.extend(sets!(
+            $variant,
+            $prepare,
+            $pull,
+            $dfa,
+            $name,
+            "cmp-or-32",
+            CmpOr<u8x32<Native>>
+        ));
+        entries.extend(sets!(
+            $variant,
+            $prepare,
+            $pull,
+            $dfa,
+            $name,
+            "cmp-or-64",
+            CmpOr<u8x64<Native>>
+        ));
+        entries.extend(sets!(
+            $variant,
+            $prepare,
+            $pull,
+            $dfa,
+            $name,
+            "nibble-map-16",
+            NibbleMap<u8x16<Native>>
+        ));
+        entries.extend(sets!(
+            $variant,
+            $prepare,
+            $pull,
+            $dfa,
+            $name,
+            "nibble-map-32",
+            NibbleMap<u8x32<Native>>
+        ));
+        entries.extend(sets!(
+            $variant,
+            $prepare,
+            $pull,
+            $dfa,
+            $name,
+            "nibble-map-64",
+            NibbleMap<u8x64<Native>>
+        ));
         // SSE 4.2, which every AVX2 cpu has
-        #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), target_feature = "avx2"))]
+        #[cfg(all(
+            any(target_arch = "x86", target_arch = "x86_64"),
+            target_feature = "avx2"
+        ))]
         {
-            entries.extend(sets!($variant, $prepare, $pull, $dfa, $name, "pcmpistr-16", Pcmpistr<u8x16<Native>>));
-            entries.extend(sets!($variant, $prepare, $pull, $dfa, $name, "pcmpistr-32", Pcmpistr<u8x32<Native>>));
-            entries.extend(sets!($variant, $prepare, $pull, $dfa, $name, "pcmpistr-64", Pcmpistr<u8x64<Native>>));
-            entries.extend(sets!($variant, $prepare, $pull, $dfa, $name, "pcmpestr-16", Pcmpestr<u8x16<Native>>));
-            entries.extend(sets!($variant, $prepare, $pull, $dfa, $name, "pcmpestr-32", Pcmpestr<u8x32<Native>>));
-            entries.extend(sets!($variant, $prepare, $pull, $dfa, $name, "pcmpestr-64", Pcmpestr<u8x64<Native>>));
+            entries.extend(sets!(
+                $variant,
+                $prepare,
+                $pull,
+                $dfa,
+                $name,
+                "pcmpistr-16",
+                Pcmpistr<u8x16<Native>>
+            ));
+            entries.extend(sets!(
+                $variant,
+                $prepare,
+                $pull,
+                $dfa,
+                $name,
+                "pcmpistr-32",
+                Pcmpistr<u8x32<Native>>
+            ));
+            entries.extend(sets!(
+                $variant,
+                $prepare,
+                $pull,
+                $dfa,
+                $name,
+                "pcmpistr-64",
+                Pcmpistr<u8x64<Native>>
+            ));
+            entries.extend(sets!(
+                $variant,
+                $prepare,
+                $pull,
+                $dfa,
+                $name,
+                "pcmpestr-16",
+                Pcmpestr<u8x16<Native>>
+            ));
+            entries.extend(sets!(
+                $variant,
+                $prepare,
+                $pull,
+                $dfa,
+                $name,
+                "pcmpestr-32",
+                Pcmpestr<u8x32<Native>>
+            ));
+            entries.extend(sets!(
+                $variant,
+                $prepare,
+                $pull,
+                $dfa,
+                $name,
+                "pcmpestr-64",
+                Pcmpestr<u8x64<Native>>
+            ));
         }
         entries
     }};
@@ -320,10 +439,28 @@ macro_rules! scalar {
 /// The skipping `read_record` variants for one DFA.
 macro_rules! simd {
     ($dfa:ty, $name:literal) => {
-        classifiers!("compaction/simd", compaction_simd, compaction_simd_records, $dfa, $name)
-            .into_iter()
-            .chain(classifiers!("compaction/simd-check", compaction_simd_check, compaction_simd_check_records, $dfa, $name))
-            .chain(classifiers!("zerocopy/simd", zerocopy_simd, zerocopy_simd_records, $dfa, $name))
+        classifiers!(
+            "compaction/simd",
+            compaction_simd,
+            compaction_simd_records,
+            $dfa,
+            $name
+        )
+        .into_iter()
+        .chain(classifiers!(
+            "compaction/simd-check",
+            compaction_simd_check,
+            compaction_simd_check_records,
+            $dfa,
+            $name
+        ))
+        .chain(classifiers!(
+            "zerocopy/simd",
+            zerocopy_simd,
+            zerocopy_simd_records,
+            $dfa,
+            $name
+        ))
     };
 }
 
@@ -359,7 +496,10 @@ pub fn select(include: &[String], exclude: &[String]) -> Result<Vec<Parser>, Str
     for pattern in include {
         if !all().iter().any(|p| glob(pattern, p.name)) {
             let names: Vec<_> = all().iter().map(|p| p.name).collect();
-            return Err(format!("no parser matches {pattern:?}; available:\n  {}", names.join("\n  ")));
+            return Err(format!(
+                "no parser matches {pattern:?}; available:\n  {}",
+                names.join("\n  ")
+            ));
         }
     }
     Ok(all()
@@ -405,8 +545,14 @@ mod tests {
     #[test]
     fn globs() {
         assert!(glob("*", "compaction/plain/-/table"));
-        assert!(glob("compaction/*/table", "compaction/simd/nibble-map/table"));
-        assert!(glob("*/nibble-map/*", "compaction/simd-check/nibble-map/class"));
+        assert!(glob(
+            "compaction/*/table",
+            "compaction/simd/nibble-map/table"
+        ));
+        assert!(glob(
+            "*/nibble-map/*",
+            "compaction/simd-check/nibble-map/class"
+        ));
         assert!(!glob("compaction/*/table", "compaction/plain/-/class"));
         assert!(glob("csv-core/?fa", "csv-core/dfa"));
         assert!(!glob("csv-core", "csv-core/dfa"));

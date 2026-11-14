@@ -1,18 +1,20 @@
 //! `reset` must make a used parser behave like a new one, whatever state it was left in.
 
 use csv_parser::{
+    classifier::{Classifier, Native, NibbleMap, u8x32},
     config::{Config, QuoteStyle},
     dfa::Dfa,
     parser::{CompactionParser, Error, PerState, Shared, ZeroCopyParser, compaction, zerocopy},
     reference::ReferenceDfa,
-    classifier::{Classifier, Native, NibbleMap, u8x32},
     table::TableDfa,
 };
 
 type Records = Result<Vec<Vec<String>>, String>;
 
 fn strings<'f>(fields: impl Iterator<Item = &'f [u8]>) -> Vec<String> {
-    fields.map(|f| String::from_utf8(f.to_vec()).unwrap()).collect()
+    fields
+        .map(|f| String::from_utf8(f.to_vec()).unwrap())
+        .collect()
 }
 
 /// Read every record, or up to `limit`. Errors are compared as text, positions included.
@@ -49,44 +51,98 @@ const PARTIAL: usize = 1;
 const AFTER: &[u8] = b"x,\"y\"\"z\"\n1,2";
 
 fn config() -> Config {
-    Config::builder().quote_style(QuoteStyle::Strict(false)).escape(None).comment(None).build().unwrap()
+    Config::builder()
+        .quote_style(QuoteStyle::Strict(false))
+        .escape(None)
+        .comment(None)
+        .build()
+        .unwrap()
 }
 
 fn check<D: Dfa>() {
-    let expected: Records = Ok(vec![vec!["x".into(), "y\"z".into()], vec!["1".into(), "2".into()]]);
+    let expected: Records = Ok(vec![
+        vec!["x".into(), "y\"z".into()],
+        vec!["1".into(), "2".into()],
+    ]);
     let classifier = NibbleMap::<u8x32<Native>>::new(&config());
 
     for before in BEFORE {
         // small reads so that refills happen mid-record before and after the reset
-        let mut compaction = CompactionParser::<_, D>::with_capacity(*before, config(), 8, compaction::DEFAULT_FIELDS);
+        let mut compaction = CompactionParser::<_, D>::with_capacity(
+            *before,
+            config(),
+            8,
+            compaction::DEFAULT_FIELDS,
+        );
         let _ = drain!(compaction, read_record; PARTIAL);
         compaction.reset(AFTER);
-        assert_eq!(drain!(compaction, read_record; usize::MAX), expected, "compaction after {before:?}");
+        assert_eq!(
+            drain!(compaction, read_record; usize::MAX),
+            expected,
+            "compaction after {before:?}"
+        );
 
-        let mut branchless = CompactionParser::<_, D>::with_capacity(*before, config(), 8, compaction::DEFAULT_FIELDS);
+        let mut branchless = CompactionParser::<_, D>::with_capacity(
+            *before,
+            config(),
+            8,
+            compaction::DEFAULT_FIELDS,
+        );
         let _ = drain!(branchless, read_record_branchless; usize::MAX);
         branchless.reset(AFTER);
-        assert_eq!(drain!(branchless, read_record_branchless; usize::MAX), expected, "branchless after {before:?}");
+        assert_eq!(
+            drain!(branchless, read_record_branchless; usize::MAX),
+            expected,
+            "branchless after {before:?}"
+        );
 
-        let mut simd = CompactionParser::<_, D>::with_capacity(*before, config(), 8, compaction::DEFAULT_FIELDS);
+        let mut simd = CompactionParser::<_, D>::with_capacity(
+            *before,
+            config(),
+            8,
+            compaction::DEFAULT_FIELDS,
+        );
         let _ = drain!(simd, read_record_simd, &classifier, PerState; usize::MAX);
         simd.reset(AFTER);
-        assert_eq!(drain!(simd, read_record_simd, &classifier, PerState; usize::MAX), expected, "simd after {before:?}");
+        assert_eq!(
+            drain!(simd, read_record_simd, &classifier, PerState; usize::MAX),
+            expected,
+            "simd after {before:?}"
+        );
 
-        let mut shared = CompactionParser::<_, D>::with_capacity(*before, config(), 8, compaction::DEFAULT_FIELDS);
+        let mut shared = CompactionParser::<_, D>::with_capacity(
+            *before,
+            config(),
+            8,
+            compaction::DEFAULT_FIELDS,
+        );
         let _ = drain!(shared, read_record_simd, &classifier, Shared; usize::MAX);
         shared.reset(AFTER);
-        assert_eq!(drain!(shared, read_record_simd, &classifier, Shared; usize::MAX), expected, "simd shared after {before:?}");
+        assert_eq!(
+            drain!(shared, read_record_simd, &classifier, Shared; usize::MAX),
+            expected,
+            "simd shared after {before:?}"
+        );
 
-        let mut zerocopy = ZeroCopyParser::<_, D>::with_capacity(*before, config(), 8, zerocopy::DEFAULT_FIELDS);
+        let mut zerocopy =
+            ZeroCopyParser::<_, D>::with_capacity(*before, config(), 8, zerocopy::DEFAULT_FIELDS);
         let _ = drain!(zerocopy, read_record; usize::MAX);
         zerocopy.reset(AFTER);
-        assert_eq!(drain!(zerocopy, read_record; usize::MAX), expected, "zerocopy after {before:?}");
+        assert_eq!(
+            drain!(zerocopy, read_record; usize::MAX),
+            expected,
+            "zerocopy after {before:?}"
+        );
 
-        let mut zerocopy_simd = ZeroCopyParser::<_, D>::with_capacity(*before, config(), 8, zerocopy::DEFAULT_FIELDS);
+        let mut zerocopy_simd =
+            ZeroCopyParser::<_, D>::with_capacity(*before, config(), 8, zerocopy::DEFAULT_FIELDS);
         let _ = drain!(zerocopy_simd, read_record_simd, &classifier, PerState; usize::MAX);
         zerocopy_simd.reset(AFTER);
-        assert_eq!(drain!(zerocopy_simd, read_record_simd, &classifier, PerState; usize::MAX), expected, "zerocopy simd after {before:?}");
+        assert_eq!(
+            drain!(zerocopy_simd, read_record_simd, &classifier, PerState; usize::MAX),
+            expected,
+            "zerocopy simd after {before:?}"
+        );
     }
 }
 
