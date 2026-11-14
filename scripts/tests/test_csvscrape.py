@@ -5149,3 +5149,22 @@ class FetchFromADefinition(unittest.TestCase):
 
         again = download.fetch(GH(), "tiny", workers=1)
         self.assertEqual((again["fetched"], again["reused"]), (0, 1))
+
+
+class TextIsNotATable(unittest.TestCase):
+    def test_commas_in_sentences_count_as_prose(self):
+        from csvscrape import dataset
+
+        dialect = {"delimiter": ",", "quote": '"', "escape": None}
+        prose = "We went home, ate, and slept.\nThe next day, it rained.\n"
+        table = 'id,text\n1,"one, two, three"\n2,"""a"", b"\n'
+        self.assertGreater(dataset.prose_share(prose, dialect), dataset.MAX_PROSE_SHARE)
+        self.assertEqual(dataset.prose_share(table, dialect), 0.0)
+
+    def test_json_and_html_starts(self):
+        from csvscrape import dataset
+
+        for text in ('{"a": 1}', '﻿ [{"a": 1}]', "<html>"):
+            self.assertTrue(dataset.looks_like_json_or_html(text), text)
+        for text in ("[id],[name]\n1,a\n", "a,b\n"):
+            self.assertFalse(dataset.looks_like_json_or_html(text), text)

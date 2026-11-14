@@ -8,6 +8,7 @@ own `Config` vocabulary, and the evidence behind it.
 from __future__ import annotations
 
 import json
+import re
 import time
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
@@ -68,14 +69,70 @@ def overrides() -> dict[str, dict[str, Any]]:
         return tomllib.load(fh).get("files", {})
 
 
+# Fewer records than this and a file is marked `few_records`: a text without
+# line breaks or a header with a row or two parses as a table of anything.
+MIN_RECORDS = 5
+
+# Above this share of delimiters written like a comma in a sentence, a file is
+# marked as `prose` (see `prose_share`).
+MAX_PROSE_SHARE = 0.2
+
+# How much of the head `prose_share` and `looks_like_json_or_html` read.
+TEXT_SAMPLE = 1 << 20
+
+_JSON_OR_HTML = re.compile(r"[﻿\s]*(\{|<|\[\s*[\[{\"])")
+_LETTER = r"[^\W\d_]"
+
+
+def prose_share(text: str, dialect: dict[str, Any]) -> float:
+    """Share of the delimiters outside quotes that follow a letter and come
+    before a space.
+
+    In a table the delimiter stands between values. In running text cut at its
+    commas it follows a word, the way punctuation does. Real tables with long
+    text quote it, so quoted parts are left out. A space delimiter always looks
+    like this and is not measured.
+    """
+    delim = dialect.get("delimiter")
+    if not delim or delim == " ":
+        return 0.0
+    quote, esc = dialect.get("quote"), dialect.get("escape")
+    if quote:
+        q = re.escape(quote)
+        inner = f"[^{q}]"
+        if esc:
+            e = re.escape(esc)
+            inner = f"[^{q}{e}]|{e}."
+        # A doubled quote is two quoted parts in a row, so both go. The sample
+        # can end inside a quoted field, which then runs to its end.
+        text = re.sub(f"{q}(?:{inner})*(?:{q}|$)", "", text, flags=re.DOTALL)
+    total = text.count(delim)
+    if not total:
+        return 0.0
+    return len(re.findall(f"{_LETTER}{re.escape(delim)} ", text)) / total
+
+
+def looks_like_json_or_html(text: str) -> bool:
+    """Whether the file starts like JSON, HTML or XML rather than a table."""
+    return _JSON_OR_HTML.match(text) is not None
+
+
 def _doubts(shape: dict[str, Any], stats: dict[str, Any],
-            duckdb: dict[str, Any]) -> list[str]:
+            duckdb: dict[str, Any], text: str = "",
+            dialect: dict[str, Any] | None = None) -> list[str]:
     """Signs that the dialect may be wrong although no sniffer contradicts it.
 
     They are recorded for every file. Whether they send a file to review is
-    decided by `--review`.
+    decided by `--review`. `text` is the start of the file, `dialect` the one
+    settled on.
     """
     out = []
+    if stats["records"] < MIN_RECORDS:
+        out.append("few_records")
+    if looks_like_json_or_html(text):
+        out.append("json_or_html")
+    if dialect and prose_share(text, dialect) > MAX_PROSE_SHARE:
+        out.append("prose")
     if not shape["delimiter_found"]:
         out.append("no_delimiter")
     if stats["errors"]:
@@ -94,6 +151,17 @@ def _doubts(shape: dict[str, Any], stats: dict[str, Any],
             duckdb.get("n_columns") == 1 and shape["delimiter_found"]):
         out.append("duckdb_gave_up")
     return out
+
+
+def _head_text(head: bytes, enc: Any) -> str:
+    """The start of the file as text, for the checks that read words."""
+    from . import features
+
+    sample = head[:TEXT_SAMPLE]
+    try:
+        return sample.decode(features.source_encoding(enc) or "utf-8", "replace")
+    except LookupError:
+        return sample.decode("utf-8", "replace")
 
 
 def sniff_one(job: tuple[str, str, int, tuple[str, ...]]) -> dict[str, Any]:
@@ -148,7 +216,9 @@ def sniff_one(job: tuple[str, str, int, tuple[str, ...]]) -> dict[str, Any]:
     # Failures kept apart from the views: there they would be all-None, which
     # reads exactly like a sniffer with no opinion.
     record["sniffer_errors"] = dialects.errors(raw)
-    record["doubts"] = _doubts(raw["custom"], stats, raw.get("duckdb") or {}) if stats else []
+    record["doubts"] = _doubts(
+        raw["custom"], stats, raw.get("duckdb") or {},
+        _head_text(head, sample.enc), settled["dialect"]) if stats else []
 
     # The harness converts the file to UTF-8 from `bom`, `wide` or `detected`,
     # in that order, before it is parsed.
@@ -284,6 +354,7 @@ def needs_review(files: dict[str, Any],
       * "disagreements": only files where CleverCSV or DuckDB found something
         else than our sniffer (`contested`, see `dialects.settle`).
       * "all": also files where a sniffer failed, and files with `doubts`:
+        fewer than `MIN_RECORDS` records, a start like JSON or HTML, prose,
         no delimiter found, parse errors, ragged records, a field count that
         changes within the file, or a give-up answer from DuckDB.
     """
