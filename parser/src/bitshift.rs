@@ -1,9 +1,35 @@
-use crate::{
-    config::Config, dfa::Dfa, reference::{STATE_MASK, State, is_field_emit, is_output, transition_next_state},
-};
+use crate::{config::Config, dfa::Dfa, reference::{State, transition_next_state}};
 
 pub struct BitshiftDfa {
     table: [u64; 256],
+}
+
+const fn state_to_offset(state: State) -> u64 {
+    match state {
+        State::InField => 1,
+        State::InQuotedFieldOutput => 7,
+        State::StartRecord => 14,
+        State::InQuotedFieldDiscard => 20,
+        State::EscapeSequenceInField => 26,
+        State::EscapeSequenceInQuotedField => 32,
+        State::AfterQuote => 38,
+        State::InComment => 44,
+        State::EndField => 50,
+        State::EndRecord => 56,
+        State::Error => 62,
+    }
+}
+
+/// 6 bits per state so the masking of the shift amount is done automatically by the shift
+/// instructions
+const STATE_MASK: u64 = 0b11_1111;
+
+pub fn is_output(state: u64) -> bool {
+    state <= state_to_offset(State::InQuotedFieldOutput)
+}
+
+pub fn is_field_emit(state: u64) -> bool {
+    state >= state_to_offset(State::EndField)
 }
 
 impl BitshiftDfa {
@@ -30,7 +56,7 @@ impl BitshiftDfa {
             let mut row: u64 = 0;
 
             for state in STATES {
-                row |= (transition_next_state(config, state, b).0 as u64) << (state as u32);
+                row |= state_to_offset(transition_next_state(config, state, b).0) << state_to_offset(state);
             }
 
             self.table[b as usize] = row;
@@ -53,7 +79,7 @@ impl Dfa for BitshiftDfa {
 
     #[inline(always)]
     fn start_state(&self) -> Self::State {
-        (State::StartRecord as u64, State::StartRecord as u64)
+        (state_to_offset(State::StartRecord), state_to_offset(State::StartRecord))
     }
 
     #[inline(always)]
@@ -79,21 +105,21 @@ impl Dfa for BitshiftDfa {
 
     #[inline(always)]
     fn is_record_end(&self, (_, state): Self::State) -> bool {
-        state >= State::EndRecord as u64
+        state >= state_to_offset(State::EndRecord)
     }
 
     #[inline(always)]
     fn is_error(&self, (_, state): Self::State) -> bool {
-        state == State::Error as u64
+        state == state_to_offset(State::Error)
     }
 
     #[inline(always)]
     fn in_quoted_field(&self, (_, state): Self::State) -> bool {
-        state == State::InQuotedFieldOutput as u64 || state == State::InQuotedFieldDiscard as u64
+        state == state_to_offset(State::InQuotedFieldOutput) || state == state_to_offset(State::InQuotedFieldDiscard)
     }
 
     #[inline(always)]
     fn in_escape_sequence(&self, (_, state): Self::State) -> bool {
-        state == State::EscapeSequenceInField as u64 || state == State::EscapeSequenceInQuotedField as u64
+        state == state_to_offset(State::EscapeSequenceInField) || state == state_to_offset(State::EscapeSequenceInQuotedField)
     }
 }

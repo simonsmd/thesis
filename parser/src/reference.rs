@@ -2,31 +2,19 @@ use crate::{
     config::{Config, QuoteStyle}, dfa::Dfa,
 };
 
-// TODO: should be copy?
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
-    StartRecord = 14,
-    InField = 1,
-    InQuotedFieldOutput = 7,
-    InQuotedFieldDiscard = 20,
-    EscapeSequenceInField = 26,
-    EscapeSequenceInQuotedField = 32,
-    AfterQuote = 38,
-    InComment = 44,
-    EndField = 50,
-    EndRecord = 56,
-    Error = 62,
-}
-
-/// 6 Bits per state so the masking for the bitshift dfa is done automatically by the shift instructions
-pub const STATE_MASK: u64 = 0b11_1111;
-
-pub fn is_output(state: u64) -> bool {
-    state <= State::InQuotedFieldOutput as u64
-}
-
-pub fn is_field_emit(state: u64) -> bool {
-    state >= State::EndField as u64
+    StartRecord,
+    InField,
+    InQuotedFieldOutput,
+    InQuotedFieldDiscard,
+    EscapeSequenceInField,
+    EscapeSequenceInQuotedField,
+    AfterQuote,
+    InComment,
+    EndField,
+    EndRecord,
+    Error,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
