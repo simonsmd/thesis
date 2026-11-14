@@ -2,7 +2,7 @@ use std::{io::Read, str::Utf8Error};
 
 use fearless_simd::SimdMask;
 
-use super::{Error, Exit, Position, Sets, compaction::StructuralBlock};
+use super::{Error, Exit, Position, Sets, Stopped, compaction::StructuralBlock};
 use crate::{
     buffer::{Buffer, DEFAULT_CAPACITY, Refill},
     classifier::{self, Classifier},
@@ -23,9 +23,9 @@ pub struct ZeroCopyParser<R: Read, D: Dfa> {
     /// stores `[start, end]` index per field, relative to `record_start`
     fields: Vec<[usize; 2]>,
     position: Position,
-    /// store if this parser encountered an error so read_record does not start parsing from an
+    /// The error that stopped this parser, so read_record does not start parsing from an
     /// invalid state
-    error: bool,
+    error: Option<Stopped>,
     /// The masks of the last block `read_record_simd` classified, so a record starting in
     /// the same block does not classify it again
     structural_block: StructuralBlock,
@@ -56,7 +56,7 @@ impl<R: Read, D: Dfa> ZeroCopyParser<R, D> {
             read_index: 0,
             fields: vec![[0; 2]; fields.max(1)],
             position: Position::default(),
-            error: false,
+            error: None,
             structural_block: StructuralBlock::NONE,
             ordinary,
         }
@@ -68,7 +68,7 @@ impl<R: Read, D: Dfa> ZeroCopyParser<R, D> {
         self.buffer.clear();
         self.read_index = 0;
         self.position = Position::default();
-        self.error = false;
+        self.error = None;
         self.structural_block = StructuralBlock::NONE;
     }
 
@@ -88,8 +88,8 @@ impl<R: Read, D: Dfa> ZeroCopyParser<R, D> {
 impl<R: Read, D: Dfa> ZeroCopyParser<R, D> {
     #[inline]
     pub fn read_record(&mut self) -> Result<Option<Record<'_>>, Error> {
-        if self.error {
-            return Err(Error::Parser(self.position));
+        if let Some(stopped) = self.error {
+            return Err(stopped.error(self.position));
         }
 
         let mut record_start = self.read_index;
@@ -107,7 +107,10 @@ impl<R: Read, D: Dfa> ZeroCopyParser<R, D> {
                 let Refill { shift, read } = self
                     .buffer
                     .fill(&mut self.reader, record_start, self.read_index, 0)
-                    .map_err(Error::IO)?;
+                    .map_err(|e| {
+                        self.error = Some(Stopped::IO);
+                        Error::IO(e)
+                    })?;
                 field_start -= shift;
                 record_start -= shift;
                 self.read_index -= shift;
@@ -229,7 +232,7 @@ impl<R: Read, D: Dfa> ZeroCopyParser<R, D> {
         self.position.byte = self.buffer.source_offset(self.read_index);
 
         if is_error {
-            self.error = true;
+            self.error = Some(Stopped::Parser);
             self.position.field = field_count;
             return Err(Error::Parser(self.position));
         }
@@ -253,8 +256,8 @@ impl<R: Read, D: Dfa> ZeroCopyParser<R, D> {
         // a bitmask of the vector fits a u64, and the vectors are aligned
         const { assert!(C::LEN <= 64 && C::LEN.is_power_of_two()) };
 
-        if self.error {
-            return Err(Error::Parser(self.position));
+        if let Some(stopped) = self.error {
+            return Err(stopped.error(self.position));
         }
 
         let mut record_start = self.read_index;
@@ -278,7 +281,10 @@ impl<R: Read, D: Dfa> ZeroCopyParser<R, D> {
                 let Refill { shift, read } = self
                     .buffer
                     .fill(&mut self.reader, record_start, self.read_index, 0)
-                    .map_err(Error::IO)?;
+                    .map_err(|e| {
+                        self.error = Some(Stopped::IO);
+                        Error::IO(e)
+                    })?;
                 if shift > 0 {
                     // shift the field start if its already set
                     if phase != Phase::Start {
@@ -592,7 +598,7 @@ impl<R: Read, D: Dfa> ZeroCopyParser<R, D> {
         self.position.byte = self.buffer.source_offset(self.read_index);
 
         if is_error {
-            self.error = true;
+            self.error = Some(Stopped::Parser);
             self.position.field = field_count;
             return Err(Error::Parser(self.position));
         }

@@ -63,6 +63,23 @@ impl std::error::Error for Error {
     }
 }
 
+/// The reason why the parser is in the error state.
+#[derive(Debug, Clone, Copy)]
+enum Stopped {
+    Parser,
+    IO,
+}
+
+impl Stopped {
+    #[cold]
+    fn error(self, position: Position) -> Error {
+        match self {
+            Stopped::Parser => Error::Parser(position),
+            Stopped::IO => Error::IO(std::io::Error::other("the parser stopped after an earlier IO error")),
+        }
+    }
+}
+
 /// Defines whether the parser uses the same or a state specific set of structural bytes for SIMD
 /// classification.
 ///

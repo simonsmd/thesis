@@ -2,7 +2,7 @@ use std::{io::Read, str::Utf8Error};
 
 use fearless_simd::{SimdBase, SimdMask};
 
-use super::{Error, Exit, Position, Sets};
+use super::{Error, Exit, Position, Sets, Stopped};
 use crate::{
     buffer::{Buffer, DEFAULT_CAPACITY, Refill},
     classifier::{self, Classifier},
@@ -23,9 +23,9 @@ pub struct CompactionParser<R: Read, D: Dfa> {
     read_index: usize,
     field_ends: Vec<usize>,
     position: Position,
-    /// store if this parser encountered an error so read_record does not start parsing from an
+    /// The error that stopped this parser, so read_record does not start parsing from an
     /// invalid state
-    error: bool,
+    error: Option<Stopped>,
     /// The masks of the last block `read_record_simd` classified, so a record starting in
     /// the same block does not classify it again
     structural_block: StructuralBlock,
@@ -78,7 +78,7 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
             read_index: 0,
             field_ends: vec![0; fields.max(1)],
             position: Position::default(),
-            error: false,
+            error: None,
             structural_block: StructuralBlock::NONE,
             ordinary,
         }
@@ -90,7 +90,7 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
         self.buffer.clear();
         self.read_index = 0;
         self.position = Position::default();
-        self.error = false;
+        self.error = None;
         self.structural_block = StructuralBlock::NONE;
     }
 
@@ -117,8 +117,8 @@ const MIN_GAP: usize = 128;
 impl<R: Read, D: Dfa> CompactionParser<R, D> {
     #[inline]
     pub fn read_record(&mut self) -> Result<Option<Record<'_>>, Error> {
-        if self.error {
-            return Err(Error::Parser(self.position));
+        if let Some(stopped) = self.error {
+            return Err(stopped.error(self.position));
         }
 
         // Start the compacted record with a gap to the read index: if write trails read by only a
@@ -136,11 +136,13 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
             if self.read_index == self.buffer.len() {
                 // read the new input MIN_GAP bytes after the write index, so the gap does not
                 // drop below MIN_GAP for the rest of the record
-                // TODO: make continuing after IO errors safe
                 let Refill { shift, read } = self
                     .buffer
                     .fill(&mut self.reader, record_start, write, MIN_GAP)
-                    .map_err(Error::IO)?;
+                    .map_err(|e| {
+                        self.error = Some(Stopped::IO);
+                        Error::IO(e)
+                    })?;
                 record_start -= shift;
                 write -= shift;
                 self.read_index = write + MIN_GAP;
@@ -229,7 +231,7 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
         self.position.byte = self.buffer.source_offset(self.read_index);
 
         if is_error {
-            self.error = true;
+            self.error = Some(Stopped::Parser);
             self.position.field = field_count;
             return Err(Error::Parser(self.position));
         }
@@ -246,8 +248,8 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
     /// field.
     #[inline]
     pub fn read_record_branchless(&mut self) -> Result<Option<Record<'_>>, Error> {
-        if self.error {
-            return Err(Error::Parser(self.position));
+        if let Some(stopped) = self.error {
+            return Err(stopped.error(self.position));
         }
 
         // Start the compacted record with a gap to the read index: if write trails read by only a
@@ -265,11 +267,13 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
             if self.read_index == self.buffer.len() {
                 // read the new input MIN_GAP bytes after the write index, so the gap does not
                 // drop below MIN_GAP for the rest of the record
-                // TODO: make continuing after IO errors safe
                 let Refill { shift, read } = self
                     .buffer
                     .fill(&mut self.reader, record_start, write, MIN_GAP)
-                    .map_err(Error::IO)?;
+                    .map_err(|e| {
+                        self.error = Some(Stopped::IO);
+                        Error::IO(e)
+                    })?;
                 record_start -= shift;
                 write -= shift;
                 self.read_index = write + MIN_GAP;
@@ -358,7 +362,7 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
         self.position.byte = self.buffer.source_offset(self.read_index);
 
         if is_error {
-            self.error = true;
+            self.error = Some(Stopped::Parser);
             self.position.field = field_count;
             return Err(Error::Parser(self.position));
         }
@@ -383,8 +387,8 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
         classifier: &C,
         _sets: M,
     ) -> Result<Option<Record<'_>>, Error> {
-        if self.error {
-            return Err(Error::Parser(self.position));
+        if let Some(stopped) = self.error {
+            return Err(stopped.error(self.position));
         }
 
         // Start the compacted record with a gap to the read index: if write trails read by only a
@@ -402,11 +406,13 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
             if self.read_index == self.buffer.len() {
                 // read the new input MIN_GAP bytes after the write index, so the gap does not
                 // drop below MIN_GAP for the rest of the record
-                // TODO: make continuing after IO errors safe
                 let Refill { shift, read } = self
                     .buffer
                     .fill(&mut self.reader, record_start, write, MIN_GAP)
-                    .map_err(Error::IO)?;
+                    .map_err(|e| {
+                        self.error = Some(Stopped::IO);
+                        Error::IO(e)
+                    })?;
                 record_start -= shift;
                 write -= shift;
                 self.read_index = write + MIN_GAP;
@@ -528,7 +534,7 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
         self.position.byte = self.buffer.source_offset(self.read_index);
 
         if is_error {
-            self.error = true;
+            self.error = Some(Stopped::Parser);
             self.position.field = field_count;
             return Err(Error::Parser(self.position));
         }
@@ -566,8 +572,8 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
             assert!(MIN_GAP >= C::LEN);
         };
 
-        if self.error {
-            return Err(Error::Parser(self.position));
+        if let Some(stopped) = self.error {
+            return Err(stopped.error(self.position));
         }
 
         // Start the compacted record with a gap to the read index: if write trails read by only a
@@ -585,11 +591,13 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
             if self.read_index == self.buffer.len() {
                 // read the new input MIN_GAP bytes after the write index, so the gap does not
                 // drop below MIN_GAP for the rest of the record
-                // TODO: make continuing after IO errors safe
                 let Refill { shift, read } = self
                     .buffer
                     .fill(&mut self.reader, record_start, write, MIN_GAP)
-                    .map_err(Error::IO)?;
+                    .map_err(|e| {
+                        self.error = Some(Stopped::IO);
+                        Error::IO(e)
+                    })?;
                 record_start -= shift;
                 write -= shift;
                 self.read_index = write + MIN_GAP;
@@ -785,7 +793,7 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
         self.position.byte = self.buffer.source_offset(self.read_index);
 
         if is_error {
-            self.error = true;
+            self.error = Some(Stopped::Parser);
             self.position.field = field_count;
             return Err(Error::Parser(self.position));
         }
