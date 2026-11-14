@@ -10,6 +10,7 @@ use std::{
 use crate::{
     dataset::{self, DialectSource, Store},
     dialect::{Byte, Dialect, QuoteStyle, Terminator},
+    encoding::Data,
 };
 
 #[derive(Debug, Clone, clap::Args)]
@@ -34,6 +35,11 @@ pub struct InputArgs {
     /// Only dataset files whose encoding class is one of these, e.g. `ascii`, `utf-8` (repeatable).
     #[arg(long)]
     pub encoding: Vec<String>,
+
+    /// Encoding of `--file` inputs that are not in a dataset, as a Python codec name such as
+    /// `cp1252` or `utf-16-le`. They are converted to UTF-8 before parsing.
+    #[arg(long)]
+    pub file_encoding: Option<String>,
 
     /// Directory with the dataset manifests and `overrides.toml`.
     #[arg(long, default_value_os_t = dataset::default_datasets_dir())]
@@ -183,6 +189,8 @@ pub struct Input {
     pub size: u64,
     pub dataset: Option<String>,
     pub bucket: Option<u32>,
+    /// The encoding to convert the file from, `None` to use its bytes as they are.
+    pub encoding: Option<String>,
     pub dialect: Dialect,
     pub dialect_source: DialectSource,
     /// The dialect flags changed the dialect.
@@ -197,6 +205,16 @@ impl Input {
         } else {
             self.id.clone()
         }
+    }
+
+    /// Read the file into memory, converted to UTF-8.
+    pub fn read(&self) -> Result<Data, String> {
+        Data::read(&self.path, self.encoding.as_deref())
+    }
+
+    /// Like [`Input::read`], but maps the file where it needs no conversion.
+    pub fn map(&self) -> Result<Data, String> {
+        Data::map(&self.path, self.encoding.as_deref())
     }
 }
 
@@ -279,6 +297,7 @@ impl InputArgs {
                     size: entry.size,
                     dataset: Some(dataset.name.clone()),
                     bucket: entry.bucket,
+                    encoding: entry.encoding.as_ref().and_then(|e| e.name()).map(str::to_owned),
                     dialect,
                     dialect_source,
                     dialect_adjusted: false,
@@ -324,9 +343,14 @@ impl InputArgs {
             };
             (dialect, entry)
         });
-        let (id, base, bucket) = match known {
-            Some((Some(dialect), entry)) => (name.to_owned(), Some(dialect), entry.and_then(|e| e.bucket)),
+        let (id, base, entry) = match known {
+            Some((Some(dialect), entry)) => (name.to_owned(), Some(dialect), entry),
             _ => (path.display().to_string(), None, None),
+        };
+        let bucket = entry.and_then(|e| e.bucket);
+        let encoding = match entry.and_then(|e| e.encoding.as_ref()) {
+            Some(known) => known.name().map(str::to_owned),
+            None => self.file_encoding.clone(),
         };
 
         let (mut dialect, dialect_source) = match base {
@@ -348,6 +372,7 @@ impl InputArgs {
             size,
             dataset: None,
             bucket,
+            encoding,
             dialect_adjusted: dialect != before,
             dialect,
             dialect_source,

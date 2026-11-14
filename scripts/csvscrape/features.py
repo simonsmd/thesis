@@ -1,377 +1,345 @@
-"""Parsing-relevant description of a CSV, computed from a head sample.
+"""This project's own sniffer: the dialect of a CSV and a description of it.
 
-Every metric is a *description for stratification*, never ground truth.
-Independent sniffers disagree on a meaningful share of real files, so any
-single verdict here is a label to sample by, not a fact to score against.
+The work is done by `csvsniff`, a binary of the Rust harness, which parses the
+sample with the parser's reference DFA (see `harness/src/sniff.rs`). This
+module runs it and flattens its answer into a `Shape`, the record stored under
+`custom` in the heads log.
+
+Everything in a `Shape` describes one sample under one guessed dialect. It is
+a label to select files by and to count over, not ground truth: independent
+sniffers disagree on a meaningful share of real files.
+
+Build the binary once with
+
+    cargo build --release --bin csvsniff
+
+or point the environment variable CSVSNIFF at one.
 """
 from __future__ import annotations
 
-import re
+import json
+import os
+import subprocess
 from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any
 
-from .validate import encoding_class, probe_encoding
+from .validate import Encoding, decode, probe_encoding
 
-DELIMITERS = (",", ";", "\t", "|", ":", "\x01")
+_REPO = Path(__file__).resolve().parents[2]
 
-# Whitespace is only accepted when nothing else fits AND it splits every
-# sampled row identically. Without that bar it wins on single-column files,
-# where comma yields one field and is skipped while space happily splits prose.
-WEAK_DELIMITERS = (" ",)
-_QUOTES = ('"', "'")
 
-# How much better a later delimiter candidate must score to displace an earlier
-# one. Candidate order encodes prior likelihood, so this is what stops a
-# coincidentally-consistent character from winning on a near-tie.
-DISPLACE_MARGIN = 0.10
+def binary() -> str:
+    """Path of the `csvsniff` binary."""
+    explicit = os.environ.get("CSVSNIFF")
+    if explicit:
+        return explicit
+    path = _REPO / "target" / "release" / "csvsniff"
+    if not path.exists():
+        raise FileNotFoundError(
+            f"{path} does not exist: run `cargo build --release --bin csvsniff` "
+            "or set CSVSNIFF to the binary")
+    return str(path)
+
+
+def sniff(data: bytes | None = None, *, path: str | Path | None = None,
+          size: int | None = None, encoding: str | None = None,
+          parts: int = 0) -> dict[str, Any]:
+    """Run `csvsniff` on bytes or on a file and return what it printed.
+
+    `size` is the size of the whole file when `data` is only its start.
+    `encoding` is a Python codec name; `csvsniff` converts the input from it
+    to UTF-8 before parsing, the same way the harness does for a benchmark.
+    `parts` asks for separate record counts for that many pieces of the input.
+    """
+    command = [binary()]
+    if path is not None:
+        command.append(str(path))
+    if size is not None:
+        command += ["--size", str(size)]
+    if encoding:
+        command += ["--encoding", encoding]
+    if parts:
+        command += ["--parts", str(parts)]
+    done = subprocess.run(command, input=None if path is not None else data,
+                          capture_output=True)
+    if done.returncode != 0:
+        raise RuntimeError(done.stderr.decode("utf-8", "replace").strip()
+                           or f"csvsniff exited with {done.returncode}")
+    return json.loads(done.stdout)
 
 
 @dataclass
 class Shape:
-    """Mirrors the parser's own dialect configuration where it can.
+    """One sample as `csvsniff` sees it, plus what is known of its encoding.
 
-    Field names deliberately match the Rust struct (`delimiter`, `terminator`,
-    `quote`, `quote_style`, `escape`, `escape_in_unquoted_fields`,
-    `double_quote_escape`, `comment`) so a sampled corpus can be selected
-    directly on the axes the parser is configured by, rather than on a
-    parallel vocabulary that has to be mentally translated.
+    The dialect fields are named like the fields of the parser's `Config`, so
+    a file can be selected on exactly what the parser is configured by.
     """
-    # --- dialect, in the parser's own terms --------------------------------
+    # --- dialect ------------------------------------------------------------
     delimiter: str | None
-    terminator: str                    # crlf | lf | cr
+    # What ends a record in the parser's terms: "crlf" (any of \r, \n, \r\n)
+    # or "\n" for a file where no record ends with a \r.
+    record_terminator: str | None
     quote: str | None
-    quote_style: str | None            # strict | toggle | none
-    quotes_in_unquoted_fields: bool    # the bool inside Strict(bool)
+    quote_style: str | None            # strict | toggle, None without a quote
+    # The bool inside the parser's `Strict(bool)`: a quote in the middle of an
+    # unquoted field is ordinary text. None unless quote_style is strict.
+    quotes_in_unquoted_fields: bool | None
     escape: str | None
     escape_in_unquoted_fields: bool
     double_quote_escape: bool
     comment: str | None
-    # --- everything else ----------------------------------------------------
-    # The detector's own verdict, or None where it declined to name one. Not
-    # substituted, so `charset_normalizer said nothing` stays recoverable.
+
+    # --- how sure the guess is -----------------------------------------------
+    # False if no delimiter splits the sample into two or more columns. The
+    # delimiter is then a comma and the file is read as one column.
+    delimiter_found: bool
+    # Share of the sample's bytes in records with the most common field count
+    # under the chosen dialect, 0 to 1.
+    score: float
+    # How far `score` is ahead of the best other delimiter. Near 0 means that
+    # another delimiter fits the sample about as well.
+    margin: float
+    sniffer_version: int
+
+    # --- encoding, from `validate.probe_encoding` ---------------------------
+    # The detector's own verdict, or None where it declined to name one.
     encoding: str | None
-    # Structural observations, kept beside the verdict rather than folded into
-    # it. A binary filter is `magic_kind is not None or control_frac > 0.02`,
-    # and it lives in the selector stage so it can change without re-probing.
-    magic_kind: str | None
-    control_frac: float
-    wide_encoding: str | None
-    # The class is what selectors filter on: no detector names the exact
-    # codepage reliably, but every one of them gets the class right, and the
-    # class is what changes how a parser must treat the bytes. See
-    # validate.encoding_class.
+    # What selectors filter on, see `validate.encoding_class`.
     encoding_class: str
     bom: str | None
-    mixed_terminators: bool
-    columns: int
-    rows_sampled: int
-    ragged_rows: int
-    max_field_len: int
-    max_line_len: int
-    trailing_delimiter: bool
-    padded_fields: bool
-    empty_lines: int
-    quoting: str                       # none | minimal | all
-    embedded_delimiter: bool
-    embedded_newline: bool
-    escaped_quotes: int
-    unterminated_quote: bool
-    preamble: int
-    has_nul: bool
-    non_ascii_frac: float
-    multi_table: bool
+    wide_encoding: str | None
+    magic_kind: str | None
+    control_frac: float
+
+    # --- the sample -----------------------------------------------------------
+    # Whether the sample is the whole file. If not, its cut off last record is
+    # left out of every count below.
     complete: bool
-    # None when the sample does not reach the end of the file, which is the
-    # ordinary case for anything larger than the head: unknown is recorded as
-    # unknown rather than guessed.
+    # Bytes that were parsed: the sample as UTF-8, without a byte order mark.
+    bytes: int
+    # None when the sample does not reach the end of the file.
     ends_with_newline: bool | None
+    non_ascii_bytes: int
+    nul_bytes: int
+    has_nul: bool
+
+    # --- records --------------------------------------------------------------
+    records: int
+    # A record that ran into a parse error. A parser stops there; the sniffer
+    # skips to the end of the line and carries on.
+    errors: int
+    # The sample ends inside quotes.
+    unterminated_quote: bool
+    comment_lines: int
+    empty_lines: int
+    # Line endings outside of quoted fields.
+    lf: int
+    crlf: int
+    cr: int
+    # The most common of the three, as "lf", "crlf" or "cr".
+    terminator: str
+    mixed_terminators: bool
+    # The field count that most records have, and the share of records that
+    # have it.
+    common_field_count: int
+    common_field_count_share: float
+    # The same share measured in bytes instead of records.
+    consistent_bytes_share: float
+    min_field_count: int
+    max_field_count: int
+    distinct_field_counts: int
+    # Records with fewer / more fields than the common count, and both together.
+    short_records: int
+    long_records: int
+    ragged_rows: int
+    # Records before the first one with the common field count (among the
+    # first 64): a title or notes above the table.
+    preamble_records: int
+    # Records whose last field is empty, i.e. lines that end with a delimiter.
+    records_ending_with_empty_field: int
+    longest_record: int
+    # Record sizes in bytes. Slot 0 counts size 0, slot n counts sizes from
+    # 2^(n-1) to 2^n - 1 (so: 0, 1, 2-3, 4-7, 8-15, ...).
+    record_length_histogram: list[int]
+
+    # --- fields ---------------------------------------------------------------
+    fields: int
+    # Total length of all fields after removing quotes and escapes.
+    field_bytes: int
+    empty_fields: int
+    longest_field: int
+    # Field lengths, in the same slots as `record_length_histogram`.
+    field_length_histogram: list[int]
+    # How unpredictable the length of a field is, in bits (Shannon entropy):
+    # 0 if every field has the same length. `column_` is the same measured
+    # within each column and averaged, which is lower when the columns differ
+    # from each other but each one is regular.
+    field_length_entropy: float
+    column_length_entropy: float
+    # Share of fields with the same length as the field above them.
+    same_length_as_previous_record: float
+
+    # --- quoting --------------------------------------------------------------
+    quoting: str                       # none | minimal | all (95% of fields)
+    quoted_fields: int
+    # Quoted from the first to the last byte, the only form RFC 4180 knows.
+    fully_quoted_fields: int
+    quoted_field_bytes: int
+    # Fields that are quoted when the field before them in the record is not,
+    # or the other way round.
+    quote_switches: int
+    columns_always_quoted: int
+    columns_never_quoted: int
+    columns_sometimes_quoted: int
+    fields_with_quoted_delimiter: int
+    fields_with_quoted_terminator: int
+    embedded_delimiter: bool           # fields_with_quoted_delimiter > 0
+    embedded_newline: bool             # fields_with_quoted_terminator > 0
+    doubled_quotes: int
+    escapes_in_quoted_fields: int
+    escapes_in_unquoted_fields: int
+    # A quote that opens a quoted part after the field has started, and a
+    # field that goes on after its closing quote: both need toggle quoting.
+    quotes_opening_inside_field: int
+    text_after_closing_quote: int
+    # Quote characters that are ordinary text of an unquoted field.
+    quote_chars_in_unquoted_fields: int
+    # Fields whose content is not one unbroken piece of the input (doubled
+    # quotes, escapes, quotes in the middle), so a parser that returns slices
+    # of its input has to copy them.
+    copied_fields: int
+    copied_field_bytes: int
+
+    # --- for SIMD parsers -----------------------------------------------------
+    # Bytes at which a parser that skips ahead has to stop: delimiter,
+    # terminator, quote and escape anywhere, or only those that mean something
+    # in the state the parser is in (inside quotes only quote and escape).
+    structural_bytes: int
+    structural_bytes_in_state: int
+    # Distances between two such bytes, in the slots described above.
+    structural_gap_histogram: list[int]
+    structural_gap_in_state_histogram: list[int]
 
     def as_dict(self) -> dict:
         return asdict(self)
 
 
-def _split_lines(text: str) -> tuple[list[str], str, bool]:
-    crlf, lone_lf = text.count("\r\n"), text.count("\n") - text.count("\r\n")
-    lone_cr = text.count("\r") - crlf
-    if crlf and (lone_lf or lone_cr):
-        mixed = True
-    else:
-        mixed = bool(lone_lf and lone_cr)
-    if crlf >= max(lone_lf, lone_cr):
-        return text.split("\r\n"), "crlf", mixed
-    if lone_cr > lone_lf:
-        return text.split("\r"), "cr", mixed
-    return text.split("\n"), "lf", mixed
+# Keys of csvsniff's `stats` that a Shape takes over under the same name.
+_SAME_NAME = (
+    "records", "errors", "unterminated_quote", "comment_lines", "empty_lines",
+    "common_field_count", "common_field_count_share", "consistent_bytes_share",
+    "min_field_count", "max_field_count", "distinct_field_counts",
+    "short_records", "long_records", "preamble_records",
+    "records_ending_with_empty_field", "longest_record",
+    "record_length_histogram", "fields", "field_bytes", "empty_fields",
+    "longest_field", "field_length_histogram", "field_length_entropy",
+    "column_length_entropy", "same_length_as_previous_record",
+    "quoted_fields", "fully_quoted_fields", "quoted_field_bytes",
+    "quote_switches", "columns_always_quoted", "columns_never_quoted",
+    "columns_sometimes_quoted", "fields_with_quoted_delimiter",
+    "fields_with_quoted_terminator", "doubled_quotes",
+    "escapes_in_quoted_fields", "escapes_in_unquoted_fields",
+    "quotes_opening_inside_field", "text_after_closing_quote",
+    "copied_fields", "copied_field_bytes", "structural_bytes",
+    "structural_bytes_in_state", "structural_gap_histogram",
+    "structural_gap_in_state_histogram", "non_ascii_bytes", "nul_bytes",
+)
+
+# Share of quoted fields from which a file counts as quoting everything.
+QUOTES_ALL = 0.95
 
 
-def _split_fields(line: str, delim: str, quote: str | None,
-                  style: str = "toggle", escape: str | None = None,
-                  raw: bool = False, tally: dict[str, int] | None = None) -> list[str]:
-    """Split one line into fields. A probe, not a parser -- it never errors.
-
-    `style` mirrors the parser's own QuoteStyle:
-      * "toggle" -- any quote character flips quoting state, mid-field included,
-        so `ab"c,d"e` is the single field `abc,de`.
-      * "strict" -- a quote only opens a field when it appears at the field
-        boundary; elsewhere it is a literal character.
-      * "none"   -- quoting disabled entirely.
-
-    Doubled quotes always emit one literal quote. `escape` additionally treats
-    the next character as literal.
-
-    `tally`, when given, accumulates `doubled`: the number of genuine
-    doubled-quote escapes. That needs the quoting state this walk tracks --
-    the `""` in `1,"",3` is an empty field, not an escape.
-    """
-    if quote is None or style == "none":
-        return line.split(delim)
-    out: list[str] = []
-    buf: list[str] = []
-    start = 0
-    in_q = False
-    at_field_start = True
-    i = 0
-    while i < len(line):
-        ch = line[i]
-        if escape and ch == escape and i + 1 < len(line):
-            buf.append(line[i + 1])
-            i += 2
-            at_field_start = False
-            continue
-        if in_q:
-            if ch == quote:
-                if i + 1 < len(line) and line[i + 1] == quote:
-                    buf.append(quote)
-                    if tally is not None:
-                        tally["doubled"] += 1
-                    i += 2
-                    continue
-                in_q = False
-            else:
-                buf.append(ch)
-        elif ch == quote and (style == "toggle" or at_field_start):
-            in_q = True
-            at_field_start = False
-        elif ch == delim:
-            out.append(line[start:i] if raw else "".join(buf))
-            buf = []
-            start = i + 1
-            at_field_start = True
-        else:
-            buf.append(ch)
-            at_field_start = False
-        i += 1
-    out.append(line[start:] if raw else "".join(buf))
-    return out
-
-
-def _score(rows: list[str], cand: str, quote: str | None, style: str,
-           escape: str | None = None):
-    counts = [len(_split_fields(r, cand, quote, style, escape)) for r in rows[:25]]
-    if not counts:
-        return None
-    mode = max(set(counts), key=counts.count)
-    # Gate on the modal row, not the first. A title banner ahead of the table
-    # has no delimiter, and testing rows[0] rejected the real delimiter for the
-    # whole file rather than treating the banner as one dissenting row.
-    if mode < 2:
-        return None
-    return counts.count(mode) / len(counts), mode
-
-
-def _pick_dialect(rows: list[str], escape: str | None
-                  ) -> tuple[str | None, str | None, str | None]:
-    """Jointly choose (delimiter, quote, quote_style) by consistency.
-
-    All three interact, so none can be decided first. Detecting the quote
-    character by adjacency (`",` / `,"`) misses toggle-style quoting entirely,
-    because concatenating quotes never sit next to a delimiter -- the only way
-    to find them is to try each interpretation and keep whichever splits the
-    file most consistently. The winning combination is itself the answer to
-    "which QuoteStyle does this file use".
-    """
-    best = None
-    # Quoted interpretations are tried FIRST, but only for a quote character
-    # that actually occurs. Consistency alone cannot separate "quotes present
-    # but irrelevant to the field count" (`"a","b"` splits the same either way)
-    # from "no quotes at all", so presence breaks that tie -- while requiring
-    # two occurrences keeps a lone stray apostrophe from being promoted.
-    sample = "\n".join(rows[:25])
-    combos = []
-    for q in _QUOTES:
-        if sample.count(q) >= 2:
-            combos += [(q, "strict"), (q, "toggle")]
-    combos.append((None, "none"))
-    for quote, style in combos:
-        for cand in DELIMITERS:
-            scored = _score(rows, cand, quote, style, escape)
-            if scored is None:
-                continue
-            agree, mode = scored
-            # Candidates are listed most-common-first and the quoted
-            # interpretations come before the unquoted one, so a later
-            # candidate has to beat the incumbent by a real margin to displace
-            # it; on anything closer, a tie included, the earlier one holds.
-            # (Breaking ties on column count would let ':' win on "12:34:56,5".)
-            if best is None or agree > best[0] + DISPLACE_MARGIN:
-                best = (agree, mode, cand, quote, style)
-    if best is not None:
-        return best[2], best[3], best[4]
-    for cand in WEAK_DELIMITERS:
-        scored = _score(rows, cand, None, "none", escape)
-        if scored and scored[0] == 1.0 and scored[1] >= 3:
-            return cand, None, None
-    return None, None, None
-
-
-def describe(head: bytes, size: int | None = None) -> Shape:
-    complete = size is None or size <= len(head)
-    enc = probe_encoding(head)
-    # Every sample is described, including one that looks binary: a dialect
-    # sniffed out of a gzip stream is meaningless, but it is recorded next to
-    # magic_kind, so a query can drop it -- and a misjudged file keeps its
-    # verdict.
-    try:
-        text = head.decode(enc.codec, errors="replace")
-    except (LookupError, TypeError):
-        text = head.decode("latin-1", errors="replace")
-    text = text.lstrip("﻿")
-
-    lines, terminator, mixed = _split_lines(text)
-    # The final line of a truncated sample is a fragment, not a record.
-    if not complete and len(lines) > 1:
-        lines = lines[:-1]
-
-    preamble, comment_char = 0, None
-    for line in lines:
-        stripped = line.strip()
-        if not stripped:
-            preamble += 1
-        elif stripped[0] in "#;/" and not stripped.startswith(";;"):
-            preamble += 1
-            comment_char = comment_char or stripped[0]
-        else:
-            break
-    body = [ln for ln in lines[preamble:] if ln.strip()]
-
-    escape = "\\" if re.search(r'\\["\']', text) else None
-    delimiter, quote_char, quote_style = _pick_dialect(body, escape)
-
-    # Real files often open with a title or metadata banner carrying no
-    # delimiter before the table. Strip the leading delimiter-free lines and
-    # vote again on what remains.
-    if delimiter:
-        skip = 0
-        for line in body:
-            if line.count(delimiter) == 0:
-                skip += 1
-            else:
-                break
-        if skip and skip < len(body):
-            preamble += skip
-            body = body[skip:]
-            delimiter, quote_char, quote_style = _pick_dialect(body, escape)
-
-    counts, max_field, max_line = [], 0, 0
-    tally = {"doubled": 0}
-    for line in body[:200]:
-        max_line = max(max_line, len(line))
-        if delimiter:
-            fields = _split_fields(line, delimiter, quote_char, quote_style or "toggle",
-                                   escape, tally=tally)
-            counts.append(len(fields))
-            for f in fields:
-                max_field = max(max_field, len(f))
-        else:
-            max_field = max(max_field, len(line))
-    columns = max(set(counts), key=counts.count) if counts else 1
-    ragged = sum(1 for c in counts if c != columns)
-
-    # How quoting is *used*, field by field: a quote opening a field is real
-    # quoting; a quote inside an otherwise-bare field is the Strict(bool) case.
-    # Splitting must be quote-aware here or a strict file's `"x,1"` looks like
-    # a bare field `1"` containing a quote.
-    quoted_cells = total_cells = bare_with_quote = 0
-    escape_unquoted = False
-    if delimiter:
-        for line in body[:50]:
-            for raw_field in _split_fields(line, delimiter, quote_char,
-                                           quote_style or "none", escape, raw=True):
-                stripped = raw_field.strip()
-                total_cells += 1
-                if quote_char and stripped.startswith(quote_char):
-                    quoted_cells += 1
-                elif quote_char and quote_char in stripped:
-                    bare_with_quote += 1
-                if escape and escape in stripped and not (
-                        quote_char and stripped.startswith(quote_char)):
-                    escape_unquoted = True
-    if not quote_char or total_cells == 0:
+def shape(out: dict[str, Any], enc: Encoding,
+          ends_with_newline: bool | None) -> Shape:
+    """Flatten the output of `sniff` into a `Shape`."""
+    dialect, stats, detection = out["dialect"], out["stats"], out["detection"]
+    endings = stats["line_endings"]
+    if not stats["quoted_fields"]:
         quoting = "none"
-    elif quoted_cells >= total_cells * 0.95:
+    elif stats["quoted_fields"] >= QUOTES_ALL * stats["fields"]:
         quoting = "all"
-    elif quoted_cells:
-        quoting = "minimal"
     else:
-        quoting = "none"
-
-    # Doubled quotes come from the field walker above, which can tell an
-    # escape from an empty quoted field `""`.
-    escaped = tally["doubled"]
-    embedded_delim = embedded_nl = False
-    if quote_char:
-        quoted = re.findall(rf"{re.escape(quote_char)}([^{re.escape(quote_char)}]*)"
-                            rf"{re.escape(quote_char)}", text, flags=re.S)
-        if delimiter:
-            embedded_delim = any(delimiter in q for q in quoted)
-        embedded_nl = any("\n" in q or "\r" in q for q in quoted)
-
-    # Parity over the same sample the escapes were counted in, so the two agree.
-    sampled = "\n".join(body[:200])
-    unterminated = bool(quote_char) and (
-        sampled.count(quote_char) - 2 * escaped) % 2 == 1
-
-    trailing = bool(delimiter) and sum(
-        1 for ln in body[:50] if ln.endswith(delimiter)) > len(body[:50]) * 0.5
-    padded = bool(delimiter) and any(
-        f" {delimiter}" in ln or f"{delimiter} " in ln for ln in body[:50])
-
-    multi_table = False
-    if delimiter and len(counts) > 2:
-        seen_blank = False
-        for line in lines[preamble:][:200]:
-            if not line.strip():
-                seen_blank = True
-            elif seen_blank:
-                if len(_split_fields(line, delimiter, quote_char,
-                                     quote_style or "toggle", escape)) != columns:
-                    multi_table = True
-                break
-
-    non_ascii = sum(1 for b in head if b > 127) / max(len(head), 1)
-    # Only a sample that reaches the end of the file can answer this.
-    ends_nl = head.endswith((b"\n", b"\r")) if complete else None
-
+        quoting = "minimal"
     return Shape(
-        delimiter=delimiter, terminator=terminator, quote=quote_char,
-        quote_style=(quote_style if quote_char else None),
-        quotes_in_unquoted_fields=bare_with_quote > 0,
-        escape=escape, escape_in_unquoted_fields=escape_unquoted,
-        double_quote_escape=escaped > 0, comment=comment_char,
+        delimiter=dialect["delimiter"],
+        record_terminator=dialect["terminator"],
+        quote=dialect["quote"],
+        quote_style=dialect["quote_style"],
+        quotes_in_unquoted_fields=dialect["quotes_in_unquoted_fields"],
+        escape=dialect["escape"],
+        escape_in_unquoted_fields=dialect["escape_in_unquoted_fields"],
+        double_quote_escape=dialect["double_quote_escape"],
+        comment=dialect["comment"],
+        delimiter_found=detection["delimiter_found"],
+        score=detection["score"],
+        margin=detection["margin"],
+        sniffer_version=out["version"],
         encoding=enc.encoding,
-        encoding_class=encoding_class(enc.bom or enc.wide or enc.encoding),
-        magic_kind=enc.magic, control_frac=round(enc.control_frac, 5),
-        wide_encoding=enc.wide, bom=enc.bom, mixed_terminators=mixed,
-        columns=columns, rows_sampled=len(body), ragged_rows=ragged,
-        max_field_len=max_field, max_line_len=max_line,
-        trailing_delimiter=trailing, padded_fields=padded,
-        empty_lines=sum(1 for ln in lines[preamble:] if not ln.strip()),
-        quoting=quoting, embedded_delimiter=embedded_delim,
-        embedded_newline=embedded_nl, escaped_quotes=escaped,
-        unterminated_quote=unterminated, preamble=preamble,
-        # Checked on the decoded text, not the raw bytes: UTF-16 encodes ASCII
-        # with a NUL in every other byte, and the flag is meant to catch an
-        # embedded NUL in the text itself.
-        has_nul="\x00" in text, non_ascii_frac=round(non_ascii, 5),
-        multi_table=multi_table, complete=complete,
-        ends_with_newline=ends_nl,
+        encoding_class=enc.encoding_class,
+        bom=enc.bom,
+        wide_encoding=enc.wide,
+        magic_kind=enc.magic,
+        control_frac=round(enc.control_frac, 5),
+        complete=out["complete"],
+        bytes=out["bytes"],
+        ends_with_newline=ends_with_newline,
+        has_nul=stats["nul_bytes"] > 0,
+        lf=endings["lf"], crlf=endings["crlf"], cr=endings["cr"],
+        # on a tie the more common convention
+        terminator=max(("lf", "crlf", "cr"), key=lambda name: endings[name]),
+        mixed_terminators=sum(1 for n in endings.values() if n) > 1,
+        ragged_rows=stats["short_records"] + stats["long_records"],
+        quoting=quoting,
+        embedded_delimiter=stats["fields_with_quoted_delimiter"] > 0,
+        embedded_newline=stats["fields_with_quoted_terminator"] > 0,
+        quote_chars_in_unquoted_fields=stats["quotes_in_unquoted_fields"],
+        **{name: stats[name] for name in _SAME_NAME},
     )
+
+
+def source_encoding(enc: Encoding) -> str | None:
+    """The encoding to convert a sample from, or None to use its bytes as
+    they are: the byte order mark if there is one, then UTF-16 recognised by
+    its zero bytes, then what the detector said."""
+    return enc.bom or enc.wide or enc.encoding
+
+
+def run(data: bytes | None, enc: Encoding, *, path: str | Path | None = None,
+        size: int | None = None, parts: int = 0) -> dict[str, Any]:
+    """`sniff` with the sample's encoding, for input in any encoding.
+
+    `csvsniff` has no decoder for a few encodings Python knows (utf-7, hz,
+    some DOS code pages are read byte by byte). A sample in one of those is
+    decoded here and handed over as UTF-8. A file is not: the harness could
+    not convert it for a benchmark either, so the error stands.
+    """
+    try:
+        return sniff(data, path=path, size=size, parts=parts,
+                     encoding=source_encoding(enc))
+    except RuntimeError as exc:
+        if path is not None or "no decoder" not in str(exc):
+            raise
+    text = decode(data, enc).encode("utf-8", "replace")
+    # `size` counts bytes in the original encoding, so it cannot be compared
+    # with the converted sample. Any size above the sample's own says "there
+    # is more", which is all csvsniff needs to know.
+    complete = size is None or size <= len(data)
+    return sniff(text, parts=parts, size=None if complete else len(text) + 1)
+
+
+def describe(head: bytes, size: int | None = None,
+             enc: Encoding | None = None) -> Shape:
+    """Describe a sample: the start of a file, or all of it.
+
+    `size` is the size of the whole file; left out, the sample is taken to be
+    complete. `enc` is the sample's `probe_encoding`, passed in by
+    `sniffers.Sample` so that every sniffer works from the same reading.
+    """
+    if enc is None:
+        enc = probe_encoding(head)
+    out = run(head, enc, size=size)
+    # Only a sample that reaches the end of the file can answer this.
+    ends_nl = head.endswith((b"\n", b"\r")) if out["complete"] else None
+    return shape(out, enc, ends_nl)

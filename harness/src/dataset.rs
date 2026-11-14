@@ -42,7 +42,22 @@ pub enum DialectSource {
 #[derive(Debug, Clone, Deserialize)]
 pub struct Encoding {
     pub class: String,
+    /// The encoding named by a byte order mark.
     pub bom: Option<String>,
+    /// UTF-16 without a byte order mark, recognised by its zero bytes.
+    #[serde(default)]
+    pub wide: Option<String>,
+    /// The encoding the detector named, if it named one.
+    #[serde(default)]
+    pub detected: Option<String>,
+}
+
+impl Encoding {
+    /// The encoding to convert the file from, strongest evidence first. `None` if nothing names
+    /// one.
+    pub fn name(&self) -> Option<&str> {
+        self.bom.as_deref().or(self.wide.as_deref()).or(self.detected.as_deref())
+    }
 }
 
 /// One file in a dataset manifest. Fields the harness does not use are ignored.

@@ -123,6 +123,19 @@ def _fold(key: str, total: dict, value):
 def _cmd_probe(args) -> int:
     from . import probe
 
+    if getattr(args, "resniff", None):
+        stats = _with_reporter(args.quiet, lambda rep: probe.resniff(
+            args.resniff, target=args.resniff_into, cache_dir=args.cache_dir,
+            which=tuple(x.strip() for x in args.resniff_sniffers.split(",")
+                        if x.strip()),
+            sniff_procs=args.sniff_procs, limit=args.limit, on_event=rep,
+            skip_unchanged=args.resniff_skip_unchanged))
+        _print_stats(stats)
+        if stats.get("interrupted"):
+            print("  interrupted -- run the same command again to continue")
+            return 130
+        return 0
+
     def body(rep) -> dict:
         # Without --limit, passes of PROBE_DRAW until there is nothing left to
         # draw. Every pass seals its own heads shards on exit, which is how the
@@ -216,13 +229,23 @@ def _cmd_download(args) -> int:
         _client(rep), n=args.count, seed=args.seed, workers=args.workers,
         per_repo=args.per_repo, per_owner=args.per_owner,
         select=args.select, utf8=args.utf8, mode=args.sampling, dataset=dataset,
-        max_bucket=args.max_bucket, sniff=not args.no_sniff,
+        max_bucket=args.max_bucket, min_size=args.min_size,
+        max_size=args.max_size, sniff=not args.no_sniff,
         sniffers_which=tuple(x.strip() for x in args.sniffers.split(',') if x.strip()),
-        sniff_procs=args.sniff_procs, source=args.source, on_event=rep))
+        sniff_procs=args.sniff_procs, source=args.source, on_event=rep,
+        review=args.review))
     print(download.summary(stats))
     if stats.get("interrupted"):
         print("  interrupted -- downloaded files are kept; re-run to continue")
         return 130
+    return 0
+
+
+def _cmd_drop(args) -> int:
+    from . import download
+
+    print(f"wrote {download.drop(args.dataset, args.keys, args.reason)}")
+    print("  re-run `download` with the dataset's flags to refill the strata")
     return 0
 
 
@@ -355,6 +378,24 @@ def _positive(value: str) -> int:
     return n
 
 
+# Binary, like `index.human` and the buckets: "64K" is 2**16, not 64,000.
+_SIZE_UNITS = {"": 0, "k": 10, "m": 20, "g": 30, "t": 40}
+
+
+def _size(value: str) -> int:
+    """argparse type for a byte count: `4096`, `64K`, `1.5MiB`, `2g`."""
+    text = value.strip().lower().removesuffix("b").removesuffix("i")
+    unit = text[-1:] if text[-1:] in _SIZE_UNITS else ""
+    try:
+        n = int(float(text[:len(text) - len(unit)]) * 2 ** _SIZE_UNITS[unit])
+    except (ValueError, OverflowError):
+        raise argparse.ArgumentTypeError(
+            f"not a size: {value!r} (bytes, or K/M/G/T with binary units)")
+    if n < 0:
+        raise argparse.ArgumentTypeError(f"must not be negative, got {value!r}")
+    return n
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="csvscrape")
     parser.add_argument("--quiet", action="store_true",
@@ -426,11 +467,34 @@ def build_parser() -> argparse.ArgumentParser:
                         "where it leaves a usable traceback")
     p.add_argument("--no-sniff", action="store_true",
                    help="fetch only; don't modify datasets/<name>.json")
+    p.add_argument("--review", choices=["disagreements", "all"],
+                   default="disagreements",
+                   help="which files are listed in <name>.review.toml for a "
+                        "manual check of their dialect. disagreements = only "
+                        "files where CleverCSV or DuckDB found a different "
+                        "delimiter, quote, escape or comment character than "
+                        "our sniffer (default). all = also files where a "
+                        "sniffer failed or gave up, no delimiter was found, "
+                        "or the file does not parse evenly with its dialect")
     p.add_argument("--source", choices=list(SOURCES), default="github",
                    help="which pool to draw from")
     p.add_argument("--max-bucket", type=int, default=None,
                    help="skip buckets above this power of two: "
                         "--max-bucket 24 caps files at 32 MiB")
+    p.add_argument("--min-size", type=_size, default=None,
+                   help="draw only files of at least this many bytes. Takes "
+                        "binary suffixes: 64K, 1.5M, 2GiB")
+    p.add_argument("--max-size", type=_size, default=None,
+                   help="draw only files of at most this many bytes. Unlike "
+                        "--max-bucket it may cut an octave part-way; both "
+                        "apply if given")
+
+    p = sub.add_parser("drop", help="remove files from a dataset by hand")
+    p.set_defaults(run=_cmd_drop)
+    p.add_argument("--dataset", required=True)
+    p.add_argument("--reason", required=True,
+                   help="why, recorded as the rejection reason manual/<reason>")
+    p.add_argument("keys", nargs="+", metavar="content_key")
 
     p = sub.add_parser("selectors", help="list available corpus selectors")
     p.set_defaults(run=_cmd_selectors)
@@ -481,6 +545,27 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--cache-dir", default=None,
                    help="where cached bytes go (or CSVSCRAPE_CACHE); may be a "
                         "different filesystem from the data root")
+    p.add_argument("--resniff", metavar="LOG", default=None,
+                   help="do not fetch anything: sniff the cached heads of an "
+                        "earlier run again. LOG is that run's heads log, "
+                        "moved aside first (rename data/heads to "
+                        "data/heads-old and pass heads-old). Do not delete "
+                        "it before this has finished: its records are the "
+                        "only index into the cache")
+    p.add_argument("--resniff-skip-unchanged", action="store_true",
+                   help="with --resniff: keep the old CleverCSV and DuckDB "
+                        "verdicts for heads that are ASCII or UTF-8 without a "
+                        "byte order mark. Their input for those heads is the "
+                        "same as when they first ran, so only heads in other "
+                        "encodings are sniffed again by them")
+    p.add_argument("--resniff-into", metavar="LOG", default="heads",
+                   help="the heads log --resniff writes to (default: heads). "
+                        "For the Kaggle heads: --resniff kaggle/heads-old "
+                        "--resniff-into kaggle/heads")
+    p.add_argument("--resniff-sniffers", default="custom",
+                   help="sniffers that --resniff runs again; the verdicts of "
+                        "the others are copied from the old records "
+                        "(default: custom)")
 
     p = sub.add_parser("dialects",
                        help="dialect breakdown of probed github files")

@@ -9,6 +9,7 @@ csv-parser.workspace = true
 clap = { version = "4", features = ["derive"] }
 csv = "1"
 csv-core = "0.1"
+encoding_rs = "0.8"
 libc = "0.2"
 memmap2 = "0.9"
 perf-event2 = "0.7"

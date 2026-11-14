@@ -62,7 +62,11 @@ def _target(content_key: str) -> Path:
 
 
 def outcomes(dataset: str = DEFAULT_DATASET) -> tuple[set[str], set[str]]:
-    """(kept, rejected) content keys from previous runs of this dataset."""
+    """(kept, rejected) content keys from previous runs of this dataset.
+
+    The newest record per key decides, so a file `drop` removed after it was
+    kept counts as rejected -- which also keeps it out of every later draw.
+    """
     kept, rejected = set(), set()
     for rec in log.read(log_name(dataset)):
         if rec.get("state") == "ok":
@@ -70,6 +74,7 @@ def outcomes(dataset: str = DEFAULT_DATASET) -> tuple[set[str], set[str]]:
             rejected.discard(rec["content_key"])
         else:
             rejected.add(rec["content_key"])
+            kept.discard(rec["content_key"])
     return kept, rejected
 
 
@@ -315,13 +320,19 @@ def run(
     mode: str = sample.LOG_UNIFORM,
     dataset: str = DEFAULT_DATASET,
     max_bucket: int | None = None,
+    min_size: int | None = None,
+    max_size: int | None = None,
     sniff: bool = True,
     sniffers_which: tuple[str, ...] | None = None,
     sniff_procs: int = 0,
     source: str = "github",
     on_event: Any = None,
+    review: str = "disagreements",
 ) -> dict[str, Any]:
     emit = on_event or (lambda *a, **k: None)
+    if min_size is not None and max_size is not None and min_size > max_size:
+        return {"error": f"--min-size {min_size:,} is above "
+                         f"--max-size {max_size:,}: nothing can be drawn"}
     CORPUS.mkdir(parents=True, exist_ok=True)
     kept, rejected = outcomes(dataset)
 
@@ -337,6 +348,13 @@ def run(
         # bounds a uniform draw too, just far less dramatically -- most of that
         # pool is small already.
         pool = pool.filter(pl.col("bucket") <= max_bucket)
+    # Exact byte bounds. An octave they cut part-way just has less supply,
+    # which the water-filling below already copes with: the log-uniform shape
+    # holds across the octaves wholly inside the range.
+    if min_size is not None:
+        pool = pool.filter(pl.col("size") >= min_size)
+    if max_size is not None:
+        pool = pool.filter(pl.col("size") <= max_size)
     # The per-stratum target, computed once and held fixed across the rounds
     # below: topping up with a freshly water-filled quota would spread the
     # replacements evenly instead of refilling the specific strata whose files
@@ -366,12 +384,13 @@ def run(
          dataset=dataset, selector=selector.name, source=source,
          bytes=sample.projected_bytes(quota, mode, available))
 
+    # Counted from the current members rather than every `ok` ever logged, so
+    # a stratum that lost a file to `drop` shows a deficit and is refilled.
     have = Counter()
-    for rec in log.read(log_name(dataset)):
-        if rec.get("state") == "ok":
-            # Older records carry only the size bucket, which is what a
-            # log-uniform stratum is anyway.
-            have[rec.get("stratum", rec["bucket"])] += 1
+    for rec in members(dataset):
+        # Older records carry only the size bucket, which is what a
+        # log-uniform stratum is anyway.
+        have[rec.get("stratum", rec["bucket"])] += 1
 
     reasons: Counter = Counter()
     stats = {"dataset": dataset, "selector": selector.name, "mode": mode,
@@ -456,11 +475,13 @@ def run(
         provenance = {
             "selector": selector.name, "sampling": mode, "utf8": utf8,
             "seed": seed, "count": n, "max_bucket": max_bucket,
+            "min_size": min_size, "max_size": max_size,
             "source": source,
             "index_watermark": index.heads_watermark(),
         }
         stats["definition"] = str(dataset_mod.build(
             dataset, kept_rows, provenance, procs=sniff_procs, on_event=emit,
+            review=review,
             **({"which": sniffers_which} if sniffers_which else {})))
         stats["review"] = str(dataset_mod.review_path(dataset))
     return stats
@@ -482,6 +503,32 @@ def members(dataset: str = DEFAULT_DATASET) -> list[dict[str, Any]]:
         else:
             latest.pop(rec["content_key"], None)
     return sorted(latest.values(), key=lambda r: (r["bucket"], r["content_key"]))
+
+
+def drop(dataset: str, keys: list[str], reason: str) -> Path:
+    """Remove files from a dataset by hand; the next `download` refills them.
+
+    Recorded as a rejection like any other, with the reason prefixed
+    `manual/`, so the reject profile still accounts for every file that left
+    and the draw never picks it again. The stratum is carried over from the
+    kept record: that is what the refill counts against.
+    """
+    current = {r["content_key"]: r for r in members(dataset)}
+    missing = [k for k in keys if k not in current]
+    if missing:
+        raise SystemExit(f"not in dataset {dataset!r}: {', '.join(missing)}")
+    with log.Writer(log_name(dataset)) as dl_log:
+        for key in keys:
+            rec = current[key]
+            dl_log.write({
+                "content_key": key, "repo_id": rec.get("repo_id"),
+                "full_name": rec["full_name"], "path": rec["path"],
+                "bucket": rec["bucket"],
+                "stratum": rec.get("stratum", rec["bucket"]),
+                "size": rec["size"], "state": "rejected",
+                "reason": f"manual/{reason}", "ts": int(time.time()),
+            })
+    return _write_manifest(dataset)
 
 
 def _write_manifest(dataset: str = DEFAULT_DATASET) -> Path:

@@ -135,10 +135,8 @@ fn main() -> Result<ExitCode, String> {
 }
 
 fn check_file(input: &Input, reference: &parsers::Parser, parsers: &[parsers::Parser], options: &[Options]) -> Result<Report, String> {
-    let file = File::open(&input.path).map_err(|e| e.to_string())?;
-    // SAFETY: corpus files are not modified while the check runs
-    let map = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| e.to_string())?;
-    Ok(check::check(reference, parsers, &input.dialect, &map, options))
+    let data = input.map()?;
+    Ok(check::check(reference, parsers, &input.dialect, &data, options))
 }
 
 fn render(n: usize, total: usize, input: &Input, report: &Result<Report, String>, verbose: bool) -> String {

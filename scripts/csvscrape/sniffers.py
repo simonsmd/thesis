@@ -2,7 +2,8 @@
 
 No normalisation into a common schema. The tools model different things --
 CleverCSV returns delimiter/quote/escape, DuckDB adds terminator, comment,
-skip-rows and header, `custom` adds quote style and the escape flags -- and
+skip-rows and header, `custom` (this project's own sniffer, see `features`)
+adds quote style, the escape flags and statistics about the content -- and
 folding them together at collection time destroys information that cannot be
 recovered. Merging is cheap to do later against stored output; re-running a
 sniffer over millions of files is not. (`dialects` does the merging for a
@@ -22,6 +23,16 @@ Two DuckDB quirks worth knowing:
     sentinel rather than a detection. That verdict is recorded verbatim all
     the same, with a `head_has_pipe` flag beside it so the sentinel case can
     be filtered out later.
+
+Every dialect sniffer reads the same decoding of the head (`Sample`):
+CleverCSV the text, DuckDB that text as UTF-8, and `custom` is told the
+encoding and converts the head itself. Left to decode on
+their own, they disagree over encoding rather than dialect -- CleverCSV takes
+text and was handed a UTF-8 decode, which makes U+FFFD (a symbol, so a
+delimiter candidate) win on legacy multibyte heads and NULs fail it on
+UTF-16; DuckDB reads bytes as UTF-8, so UTF-16 gives it the delimiter but
+never the quote, and its own `encoding=` decoders cover too little (strict
+latin-1 that rejects 0x80-0x9F, other pages only through an extension).
 """
 from __future__ import annotations
 
@@ -30,27 +41,64 @@ import signal
 import tempfile
 import threading
 import warnings
+from functools import cached_property
 from pathlib import Path
 from typing import Any
 
-from . import config
+from . import config, validate
 
 warnings.filterwarnings("ignore")
 
 ALL = ("custom", "clevercsv", "duckdb", "charset_normalizer", "chardet")
 DEFAULT = ALL
 
+# Classes whose bytes already are UTF-8 (a UTF-8 BOM included, which DuckDB
+# skips itself), so DuckDB can be given them untouched.
+_UTF8_CLASSES = ("ascii", "utf-8")
 
-def _custom(head: bytes, size: int | None) -> dict[str, Any]:
+
+class Sample:
+    """One head as the sniffers see it, decoded once.
+
+    Lazy, so a run that asks for chardet alone never pays for the encoding
+    probe, and only DuckDB pays for the re-encode.
+    """
+
+    def __init__(self, head: bytes, size: int | None = None):
+        self.head = head
+        self.size = size
+
+    @cached_property
+    def enc(self) -> validate.Encoding:
+        return validate.probe_encoding(self.head)
+
+    @cached_property
+    def text(self) -> str:
+        return validate.decode(self.head, self.enc)
+
+    @property
+    def is_utf8(self) -> bool:
+        """Whether the raw bytes are already what a UTF-8 reader should get."""
+        return self.enc.encoding_class in _UTF8_CLASSES
+
+    @cached_property
+    def utf8(self) -> bytes:
+        """`text` as UTF-8, or the head itself where that is the same thing."""
+        if self.is_utf8:
+            return self.head
+        return self.text.encode("utf-8", "replace")
+
+
+def _custom(s: Sample) -> dict[str, Any]:
     from . import features
 
-    return features.describe(head, size=size).as_dict()
+    return features.describe(s.head, size=s.size, enc=s.enc).as_dict()
 
 
-def _clevercsv(head: bytes, size: int | None) -> dict[str, Any]:
+def _clevercsv(s: Sample) -> dict[str, Any]:
     import clevercsv
 
-    text = head.decode("utf-8", "replace")[:8192]
+    text = s.text[:8192]
     try:
         d = clevercsv.Sniffer().sniff(text)
     except Exception as exc:
@@ -95,13 +143,14 @@ def _duckdb_conn():
 
 
 def duckdb_path(path: str | Path, has_pipe: bool | None = None) -> dict[str, Any]:
-    """`sniff_csv` against a file already on disk.
+    """`sniff_csv` against a file already on disk, read as UTF-8.
 
     The probe pass spills its in-memory head to a temp file for this, since
     DuckDB takes a path and not bytes. A downloaded corpus has the real file,
-    which saves the copy and removes the truncated last row. It does not let
-    DuckDB see further into the file: dialect detection reads only the first
-    buffer, whatever `sample_size` says.
+    which saves the copy and removes the truncated last row (`duckdb_file`
+    decides when it can be used). It does not let DuckDB see further into the
+    file: dialect detection reads only the first buffer, whatever
+    `sample_size` says.
     """
     try:
         cur = _duckdb_conn().execute(
@@ -124,17 +173,30 @@ def duckdb_path(path: str | Path, has_pipe: bool | None = None) -> dict[str, Any
         return {"error": type(exc).__name__}
 
 
-def _duckdb(head: bytes, size: int | None) -> dict[str, Any]:
+def _duckdb(s: Sample) -> dict[str, Any]:
     fh = tempfile.NamedTemporaryFile(suffix=".csv", delete=False)
     try:
-        fh.write(head)
+        fh.write(s.utf8)
         fh.close()
-        return duckdb_path(fh.name, has_pipe=b"|" in head)
+        return duckdb_path(fh.name, has_pipe="|" in s.text)
     finally:
         Path(fh.name).unlink(missing_ok=True)
 
 
-def _chardet(head: bytes, size: int | None) -> dict[str, Any]:
+def duckdb_file(path: str | Path, s: Sample) -> dict[str, Any]:
+    """`sniff_csv` for a downloaded file whose head is `s`.
+
+    The real file when its bytes are already UTF-8, which needs no copy and
+    has no truncated final row. Anything else goes through the head
+    transcoded to UTF-8, like the probe pass: DuckDB would otherwise read
+    UTF-16 as UTF-8 or drop every row with a byte >= 0x80.
+    """
+    if s.is_utf8:
+        return duckdb_path(path, has_pipe="|" in s.text)
+    return _duckdb(s)
+
+
+def _chardet(s: Sample) -> dict[str, Any]:
     """A second opinion on the encoding, from a different detector.
 
     `custom` already carries charset_normalizer's verdict via
@@ -143,24 +205,23 @@ def _chardet(head: bytes, size: int | None) -> dict[str, Any]:
     """
     import chardet
 
-    res = chardet.detect(head)
+    res = chardet.detect(s.head)
     return {"encoding": res.get("encoding"), "confidence": res.get("confidence"),
             "language": res.get("language")}
 
 
-def _charset_normalizer(head: bytes, size: int | None) -> dict[str, Any]:
+def _charset_normalizer(s: Sample) -> dict[str, Any]:
     """The primary detector's own verdict, recorded verbatim.
 
     `custom.encoding` is this run through `canonical_encoding`; this keeps the
-    raw name, the language guess and the multi-byte ratio alongside it.
+    raw name, the language guess and the multi-byte ratio alongside it. It is
+    the run `probe_encoding` already made, except where a BOM or NUL parity
+    let that skip the detector -- then it runs here, so the field is never
+    missing.
     """
-    from charset_normalizer import from_bytes
-
-    best = from_bytes(head).best()
-    if best is None:
-        return {"encoding": None}
-    return {"encoding": best.encoding, "language": best.language,
-            "bom": best.bom, "multi_byte_usage": round(best.multi_byte_usage, 4)}
+    if s.enc.detector is not None:
+        return dict(s.enc.detector)
+    return validate.charset_normalizer_verdict(s.head)
 
 
 _RUNNERS = {"custom": _custom, "clevercsv": _clevercsv, "duckdb": _duckdb,
@@ -170,16 +231,43 @@ _RUNNERS = {"custom": _custom, "clevercsv": _clevercsv, "duckdb": _duckdb,
 def run(head: bytes, size: int | None = None,
         which: tuple[str, ...] = DEFAULT) -> dict[str, Any]:
     """Every requested sniffer's raw output, keyed by sniffer name."""
+    return run_sample(Sample(head, size), which)
+
+
+def run_sample(s: Sample, which: tuple[str, ...] = DEFAULT) -> dict[str, Any]:
+    """`run` on a sample the caller holds, to reuse its decoding afterwards."""
     out: dict[str, Any] = {}
     for name in which:
         runner = _RUNNERS.get(name)
         if runner is None:
             continue
         try:
-            out[name] = runner(head, size)
+            out[name] = runner(s)
         except Exception as exc:  # a sniffer must never kill the pass
             out[name] = {"error": type(exc).__name__}
     return out
+
+
+# Sniffers whose input for a head depends on how the head is decoded.
+_DECODED = ("clevercsv", "duckdb")
+
+
+def run_changed(head: bytes, size: int | None, which: tuple[str, ...],
+                have: tuple[str, ...]) -> dict[str, Any]:
+    """`run`, minus the sniffers whose earlier verdict in `have` still holds.
+
+    For re-sniffing heads that were sniffed before every sniffer read the same
+    decoding. Back then CleverCSV was given the head decoded as UTF-8 and
+    DuckDB its raw bytes. For a head that is ASCII or UTF-8 that is exactly
+    what they are given now, so running them again would only repeat the old
+    answer. Two cases still differ and are run again: a head with a byte order
+    mark (CleverCSV used to see it as part of the first field), and any other
+    encoding.
+    """
+    s = Sample(head, size)
+    if s.is_utf8 and s.enc.bom is None:
+        which = tuple(n for n in which if n not in _DECODED or n not in have)
+    return run_sample(s, which)
 
 
 def worker_init(which: tuple[str, ...] = DEFAULT) -> None:

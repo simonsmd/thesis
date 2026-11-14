@@ -356,10 +356,9 @@ def awkward_quoting(pool: pl.LazyFrame) -> pl.LazyFrame:
 
 @selector("structural-oddity", needs_probe=True)
 def structural_oddity(pool: pl.LazyFrame) -> pl.LazyFrame:
-    """Preambles, multiple tables, ragged rows, mixed line endings, NULs."""
+    """Preambles, ragged rows, mixed line endings, NULs."""
     return pool.filter(
-        (pl.col("preamble").fill_null(0) > 0)
-        | pl.col("multi_table").fill_null(False)
+        (pl.col("preamble_records").fill_null(0) > 0)
         | (pl.col("ragged_rows").fill_null(0) > 0)
         | pl.col("mixed_terminators").fill_null(False)
         | pl.col("has_nul").fill_null(False)

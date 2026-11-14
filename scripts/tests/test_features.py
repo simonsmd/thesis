@@ -1,204 +1,52 @@
-"""Dialect sniffing tests.
+"""Tests for the hand-over to csvsniff and for encoding detection.
+
+Needs the binary: `cargo build --release --bin csvsniff`.
 """
 from __future__ import annotations
 
 import unittest
 
-from csvscrape.features import Shape, _split_fields, describe
+from csvscrape.features import Shape, describe
 
 
-class Splitter(unittest.TestCase):
-    """The scanner is a probe, not a parser: it must never raise."""
+class Handover(unittest.TestCase):
+    """`describe` runs csvsniff and flattens its answer. How the dialect is
+    detected is tested in `harness/src/sniff.rs`."""
 
-    LINE = 'ab"c,d"e,z'
+    def test_dialect_and_counts(self):
+        s = describe(b'a;b\r\n"x;1";2\r\n3;4\r\n')
+        self.assertEqual((s.delimiter, s.quote, s.quote_style), (";", '"', "strict"))
+        self.assertEqual(s.record_terminator, "crlf")
+        self.assertEqual((s.terminator, s.mixed_terminators), ("crlf", False))
+        self.assertEqual((s.records, s.fields, s.common_field_count), (3, 6, 2))
+        self.assertEqual((s.quoting, s.embedded_delimiter), ("minimal", True))
+        self.assertTrue(s.complete)
+        self.assertTrue(s.ends_with_newline)
 
-    def test_toggle_concatenates_across_quotes(self):
-        self.assertEqual(_split_fields(self.LINE, ",", '"', "toggle"),
-                         ["abc,de", "z"])
+    def test_a_cut_off_sample_drops_its_last_record(self):
+        s = describe(b"a,b\n1,2\n3", size=1000)
+        self.assertFalse(s.complete)
+        self.assertEqual(s.records, 2)
+        self.assertIsNone(s.ends_with_newline)
 
-    def test_strict_treats_mid_field_quote_as_literal(self):
-        self.assertEqual(_split_fields(self.LINE, ",", '"', "strict"),
-                         ['ab"c', 'd"e', "z"])
+    def test_other_encodings_are_converted(self):
+        s = describe("a;b\nä;ö\nü;ß\n".encode("utf-16"))
+        self.assertEqual((s.delimiter, s.records), (";", 3))
+        self.assertFalse(s.has_nul)
+        # utf-7 is an encoding csvsniff has no decoder for
+        from csvscrape.validate import Encoding
+        enc = Encoding(encoding="utf-7", bom=None, magic=None, wide=None, control_frac=0.0)
+        self.assertEqual(describe(b"a,b\n1,2\n", enc=enc).records, 2)
 
-    def test_none_disables_quoting(self):
-        self.assertEqual(_split_fields(self.LINE, ",", '"', "none"),
-                         ['ab"c', 'd"e', "z"])
+    def test_empty_input(self):
+        s = describe(b"")
+        self.assertEqual((s.records, s.delimiter_found), (0, False))
 
-    def test_doubled_quote_emits_one(self):
-        self.assertEqual(_split_fields('"x""y",2', ",", '"', "strict"),
-                         ['x"y', "2"])
+    def test_every_field_has_a_column_type(self):
+        from csvscrape import probe
+        for name in Shape.__annotations__:
+            probe._shape_dtype(name)
 
-    def test_escape_char_makes_next_literal(self):
-        self.assertEqual(_split_fields('"a\\",b",c', ",", '"', "strict", "\\"),
-                         ['a",b', "c"])
-
-    def test_raw_mode_preserves_quotes(self):
-        self.assertEqual(_split_fields('"x,1",2', ",", '"', "strict", raw=True),
-                         ['"x,1"', "2"])
-
-    def test_unterminated_quote_does_not_raise(self):
-        self.assertEqual(_split_fields('"abc', ",", '"', "strict"), ["abc"])
-
-    def test_lone_mid_field_quote_does_not_raise(self):
-        self.assertEqual(_split_fields('ab"cd', ",", '"', "toggle"), ["abcd"])
-
-
-class DelimiterDetection(unittest.TestCase):
-    def d(self, data: bytes) -> str | None:
-        return describe(data, size=len(data)).delimiter
-
-    def test_plain_comma(self):
-        self.assertEqual(self.d(b"a,b,c\n1,2,3\n4,5,6\n"), ",")
-
-    def test_semicolon_with_comma_decimals(self):
-        data = "nom;prix\ncafé;1,50\nthé;2,00\n".encode()
-        self.assertEqual(self.d(data), ";")
-
-    def test_tab_wins_over_commas_in_text(self):
-        """Commas inside a tab-delimited field must not win the vote."""
-        data = b"name\tdesc\nfoo\ta, b, c\nbar\td, e, f\nbaz\tg, h, i\n"
-        self.assertEqual(self.d(data), "\t")
-
-    def test_pipe_wins_over_one_comma_per_row(self):
-        data = b"id|text\n1|hello, world\n2|foo, bar\n3|baz, qux\n"
-        self.assertEqual(self.d(data), "|")
-
-    def test_colon_separated_passwd(self):
-        data = (b"root:x:0:0:root:/root:/bin/bash\n"
-                b"daemon:x:1:1:daemon:/usr/sbin:/bin/sh\n")
-        self.assertEqual(self.d(data), ":")
-
-    def test_timestamps_do_not_beat_the_comma(self):
-        """12:34:56 splits consistently, but must not outvote the comma."""
-        data = b"time,temp\n12:34:56,20\n12:35:00,21\n12:35:04,22\n"
-        self.assertEqual(self.d(data), ",")
-
-    def test_title_banner_before_table(self):
-        """A delimiter-free title row must not reject the real delimiter."""
-        data = (b"Some Export File (v1.0)\n\ndate,value,note\n"
-                b"2024-01-01,5,ok\n2024-01-02,6,ok\n")
-        shape = describe(data, size=len(data))
-        self.assertEqual(shape.delimiter, ",")
-        self.assertGreater(shape.preamble, 0)
-
-    def test_quoted_cells_containing_the_delimiter(self):
-        data = b'"a","b","c"\n"x,1","y,2","z,3"\n"p,4","q,5","r,6"\n'
-        self.assertEqual(self.d(data), ",")
-
-    def test_single_column_reports_no_delimiter(self):
-        """Space splits prose; it must not win on a single-column file."""
-        data = b"value\nsome free text here\nmore free text\nand more\n"
-        self.assertIsNone(self.d(data))
-
-    def test_latin1_semicolon(self):
-        data = "nom;ville\nJos\xe9;Z\xfcrich\nAnna;K\xf6ln\n".encode("latin-1")
-        shape = describe(data, size=len(data))
-        self.assertEqual(shape.delimiter, ";")
-        # chardet names the specific codepage; latin-1 and cp1252 are the same
-        # for parsing purposes, so assert the family rather than the label.
-        self.assertNotIn(shape.encoding, ("utf-8", "ascii", "binary"))
-
-
-class QuoteStyleDetection(unittest.TestCase):
-    def test_strict_minimal_quoting(self):
-        data = b'a,b,c\n"x,1",2,3\n"y,2",4,5\n"z,3",6,7\n'
-        shape = describe(data, size=len(data))
-        self.assertEqual(shape.quote, '"')
-        self.assertEqual(shape.quote_style, "strict")
-        self.assertEqual(shape.quoting, "minimal")
-        self.assertFalse(shape.quotes_in_unquoted_fields)
-
-    def test_toggle_style(self):
-        data = b'a,b\nab"c,d"e,2\nfg"h,i"j,3\nkl"m,n"o,4\n'
-        shape = describe(data, size=len(data))
-        self.assertEqual(shape.quote_style, "toggle")
-
-    def test_quotes_inside_bare_fields(self):
-        """Maps to the parser's Strict(true)."""
-        data = b'a,b\nsay "hi",2\nsay "yo",3\nsay "ok",4\n'
-        shape = describe(data, size=len(data))
-        self.assertEqual(shape.quote_style, "strict")
-        self.assertTrue(shape.quotes_in_unquoted_fields)
-
-    def test_all_quoted(self):
-        data = b'"a","b"\n"1","2"\n"3","4"\n'
-        self.assertEqual(describe(data, size=len(data)).quoting, "all")
-
-    def test_no_quote_char_when_absent(self):
-        shape = describe(b"a,b\n1,2\n3,4\n", size=12)
-        self.assertIsNone(shape.quote)
-        self.assertIsNone(shape.quote_style)
-
-    def test_quote_present_but_irrelevant_is_still_detected(self):
-        """`"a","b"` splits the same quoted or not; the quote char must still be
-        detected."""
-        data = b'"a","b"\n"1","2"\n"3","4"\n'
-        self.assertEqual(describe(data, size=len(data)).quote, '"')
-
-    def test_double_quote_escape(self):
-        data = b'a,b\n"x""y",2\n"p""q",3\n"r""s",4\n'
-        shape = describe(data, size=len(data))
-        self.assertTrue(shape.double_quote_escape)
-
-    def test_backslash_escape(self):
-        data = b'a,b\n"x\\",1",2\n"y\\",2",3\n"z\\",3",4\n'
-        self.assertEqual(describe(data, size=len(data)).escape, "\\")
-
-
-class StructureDetection(unittest.TestCase):
-    def test_crlf_and_bom_and_comment(self):
-        data = (b'\xef\xbb\xbf# generated\r\nname;value;note\r\n'
-                b'"a;b";1,5;ok\r\nplain;2,0;fine\r\n')
-        shape = describe(data, size=len(data))
-        self.assertEqual(shape.delimiter, ";")
-        self.assertEqual(shape.terminator, "crlf")
-        self.assertEqual(shape.bom, "utf-8-sig")
-        self.assertEqual(shape.comment, "#")
-        self.assertEqual(shape.preamble, 1)
-
-    def test_mixed_terminators(self):
-        data = b"a,b\r\n1,2\n3,4\r\n5,6\n"
-        self.assertTrue(describe(data, size=len(data)).mixed_terminators)
-
-    def test_ragged_rows_counted(self):
-        data = b"a,b,c\n1,2,3\n4,5\n6,7,8,9\n"
-        shape = describe(data, size=len(data))
-        self.assertEqual(shape.columns, 3)
-        self.assertEqual(shape.ragged_rows, 2)
-
-    def test_trailing_delimiter(self):
-        data = b"a,b,\n1,2,\n3,4,\n"
-        self.assertTrue(describe(data, size=len(data)).trailing_delimiter)
-
-    def test_complete_flag_and_truncation(self):
-        data = b"a,b\n1,2\n3,4\n"
-        self.assertTrue(describe(data, size=len(data)).complete)
-        self.assertFalse(describe(data, size=len(data) * 10).complete)
-
-    def test_truncated_sample_drops_partial_last_line(self):
-        """A fragment at the sample edge is not a record and must not count
-        as a ragged row."""
-        data = b"a,b,c\n1,2,3\n4,5,3\n7,8"
-        shape = describe(data, size=len(data) + 5000)
-        self.assertEqual(shape.ragged_rows, 0)
-
-    def test_nul_bytes_flagged(self):
-        self.assertTrue(describe(b"a,b\n1,\x002\n", size=10).has_nul)
-
-    def test_non_ascii_fraction(self):
-        data = "a,b\ncafé,2\n".encode()
-        self.assertGreater(describe(data, size=len(data)).non_ascii_frac, 0)
-
-    def test_ends_with_newline(self):
-        self.assertTrue(describe(b"a,b\n1,2\n", size=8).ends_with_newline)
-        self.assertFalse(describe(b"a,b\n1,2", size=7).ends_with_newline)
-
-    def test_empty_input_does_not_raise(self):
-        self.assertIsInstance(describe(b"", size=0), Shape)
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class BinaryAndWideEncodings(unittest.TestCase):
@@ -249,51 +97,6 @@ class BinaryAndWideEncodings(unittest.TestCase):
         self.assertEqual(enc.codec, "utf-16-le")
 
 
-class DelimiterTieBreak(unittest.TestCase):
-    """A tie keeps the earlier (more common) delimiter rather than breaking on
-    column count."""
-
-    def d(self, data: bytes) -> str | None:
-        return describe(data, size=len(data)).delimiter
-
-    def test_headerless_timestamps_do_not_beat_the_comma(self):
-        # No header row to drop the colon's agreement below the comma's, so
-        # both score 1.0 and only the tie-break decides. Breaking it on column
-        # count handed the file to ':'.
-        data = (b"12:34:56,5\n01:02:03,7\n11:22:33,9\n23:00:01,2\n")
-        self.assertEqual(self.d(data), ",")
-
-    def test_headerless_iso_timestamps(self):
-        data = (b"2024-01-01 08:00:00,berlin,5\n"
-                b"2024-01-01 09:00:00,berlin,6\n"
-                b"2024-01-01 10:00:00,berlin,7\n")
-        self.assertEqual(self.d(data), ",")
-
-    def test_a_real_margin_still_displaces(self):
-        # Tab splits every row consistently; the comma does not. The margin
-        # rule must still let the better candidate win.
-        data = b"name\tdesc\nfoo\ta, b, c\nbar\td, e, f\nbaz\tg, h, i\n"
-        self.assertEqual(self.d(data), "\t")
-
-
-class DoubledQuoteCounting(unittest.TestCase):
-    """`""` as an empty field is not a doubled-quote escape."""
-
-    def test_empty_quoted_fields_are_not_escapes(self):
-        shape = describe(b'a,b,c\n1,"",3\n4,"",6\n')
-        self.assertEqual(shape.escaped_quotes, 0)
-        self.assertFalse(shape.double_quote_escape)
-
-    def test_genuine_doubled_quote_is_counted(self):
-        shape = describe(b'a,b\n"he said ""hi""",2\n"and ""bye""",3\n')
-        self.assertEqual(shape.escaped_quotes, 4)
-        self.assertTrue(shape.double_quote_escape)
-
-    def test_empty_fields_do_not_make_the_file_look_unterminated(self):
-        shape = describe(b'a,b,c\n1,"",3\n4,"",6\n')
-        self.assertFalse(shape.unterminated_quote)
-
-
 class NulFlag(unittest.TestCase):
     """`has_nul` is checked on decoded text, so UTF-16 does not trip it."""
 
@@ -334,6 +137,44 @@ class EncodingNames(unittest.TestCase):
         enc = probe_encoding(b"PAR1" + b"\x01\x02" * 500)
         self.assertTrue(enc.looks_binary)
         self.assertEqual(enc.magic, "parquet")
+
+
+class TruncatedUtf8(unittest.TestCase):
+    """A head cut inside a UTF-8 character is still UTF-8. charset_normalizer
+    decodes strictly and, given the partial character, answered cp1250."""
+
+    ROWS = ("id;name;city\n"
+            + "".join(f"{i};Müller {i};Köln\n" for i in range(200))).encode()
+
+    def test_cut_inside_a_character_is_still_utf8(self):
+        from csvscrape.validate import probe_encoding
+
+        for char in ("ä", "€", "😀"):
+            encoded = char.encode()
+            for cut in range(1, len(encoded)):
+                with self.subTest(char=char, cut=cut):
+                    enc = probe_encoding(self.ROWS + encoded[:cut])
+                    self.assertEqual(enc.encoding, "utf-8")
+                    self.assertEqual(enc.encoding_class, "utf-8")
+
+    def test_only_a_cut_sequence_is_trimmed(self):
+        from csvscrape.validate import _whole_utf8_chars
+
+        self.assertEqual(_whole_utf8_chars(b"ab\xc3"), b"ab")
+        self.assertEqual(_whole_utf8_chars(b"ab\xe2\x82"), b"ab")
+        self.assertEqual(_whole_utf8_chars(b"ab\xf0\x9f\x98"), b"ab")
+        for whole in (b"ab", b"a\xc3\xa4", b"a\xe2\x82\xac", b"\xf0\x9f\x98\x80",
+                      b"a\x80\x80\x80\x80", b""):
+            with self.subTest(whole=whole):
+                self.assertEqual(_whole_utf8_chars(whole), whole)
+
+    def test_a_single_byte_page_keeps_its_label(self):
+        from csvscrape.validate import probe_encoding
+
+        rows = self.ROWS.decode().encode("cp1252")
+        # Ends on 0xE4 ("ä"), which UTF-8 would read as a cut lead byte.
+        enc = probe_encoding(rows + "ä".encode("cp1252"))
+        self.assertEqual(enc.encoding_class, "single-byte")
 
 
 def _have_detector() -> bool:

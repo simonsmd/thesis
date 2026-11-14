@@ -29,14 +29,7 @@ use crate::{check::Digest, dialect::Dialect, rust_csv};
 /// The parser whose output defines correct behaviour.
 pub const REFERENCE: &str = "compaction/plain/-/reference";
 
-/// `data` without a leading UTF-8 BOM.
-///
-/// rust-csv always strips it and this crate's parsers never do, so the harness strips it before
-/// any parser sees the input: it is supporting code, not something the DFAs should be compared
-/// on. Without this a BOM before a quoted first field is a parse error in strict quoting.
-pub fn without_bom(data: &[u8]) -> &[u8] {
-    data.strip_prefix(b"\xef\xbb\xbf").unwrap_or(data)
-}
+pub use crate::encoding::without_bom;
 
 /// Receives every record a parser produces.
 pub trait Consumer {

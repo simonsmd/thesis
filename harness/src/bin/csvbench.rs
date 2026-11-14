@@ -275,16 +275,17 @@ fn run(args: RunArgs) -> Result<(), String> {
     let mut problems: Vec<Problems> = Vec::new();
 
     for (i, input) in selection.inputs.iter().enumerate() {
-        let file = fs::read(&input.path).map_err(|e| format!("{}: {e}", input.path.display()))?;
-        let data = parsers::without_bom(&file);
+        let data = input.read()?;
+        let data: &[u8] = &data;
         out.line(json!({
             "type": "file",
             "id": input.id,
             "path": input.path,
             "dataset": input.dataset,
             "size": input.size,
-            // what the parsers see: `size` without a UTF-8 BOM
+            // what the parsers see: the file as UTF-8, without a byte order mark
             "bytes": data.len(),
+            "encoding": input.encoding,
             "bucket": input.bucket,
             "dialect": input.dialect,
             "dialect_source": input.dialect_source,

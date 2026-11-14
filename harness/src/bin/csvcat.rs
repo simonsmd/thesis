@@ -37,10 +37,10 @@ fn main() -> Result<(), String> {
     let mut out = io::BufWriter::new(io::stdout().lock());
     for input in &selection.inputs {
         eprintln!("{} ({:?}): {}", input.label(), input.dialect_source, input.dialect);
-        let data = std::fs::read(&input.path).map_err(|e| format!("{}: {e}", input.path.display()))?;
+        let data = input.read()?;
         (parser.supports)(&input.dialect).map_err(|reason| format!("{} cannot parse this dialect: {reason}", parser.name))?;
 
-        for record in (parser.records)(&input.dialect, parsers::without_bom(&data), &Options::default()).take(args.limit.unwrap_or(usize::MAX)) {
+        for record in (parser.records)(&input.dialect, &data, &Options::default()).take(args.limit.unwrap_or(usize::MAX)) {
             let line = match record {
                 Ok(record) => {
                     let fields: Vec<String> = record.fields.iter().map(|f| f.escape_ascii().to_string()).collect();

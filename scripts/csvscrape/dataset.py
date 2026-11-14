@@ -18,18 +18,19 @@ from . import config, dialects
 ROOT = Path(__file__).parent.parent / "datasets"
 OVERRIDES = ROOT / "overrides.toml"
 
-# How much of a file the in-memory sniffers see. `features.describe` decodes
-# its input to str and holds the line split, so peak memory is several times
-# the window, per `--sniff-procs` worker. 16 MiB covers nearly every file in
-# its entirety; larger files get `WINDOWS` windows instead.
+# How much of a file the sniffers that work in memory see (CleverCSV and the
+# encoding detectors). Our own sniffer and DuckDB are given the file itself.
 SNIFF_CAP = 16 << 20
 
-# Above the cap the front of a file stops being evidence about the rest of it,
-# so three windows are read instead of one: the opening, the middle and the
-# end. Drift -- a preamble in one dialect, two concatenated exports, a
-# semicolon section appended to a comma one -- is invisible to a prefix and is
-# exactly what a 2 GB benchmark file is likely to contain.
-WINDOWS = 3
+# Our sniffer counts records separately for this many equal pieces of a file.
+# A piece whose records mostly have a different field count than the file as
+# a whole is a file that changes along the way: a preamble in one dialect, two
+# exports glued together, a semicolon section appended to a comma one. The
+# start of a file cannot show that.
+PARTS = 8
+
+# What `--review` accepts, see `needs_review`.
+REVIEW_MODES = ("disagreements", "all")
 
 
 def manifest_path(name: str) -> Path:
@@ -67,90 +68,98 @@ def overrides() -> dict[str, dict[str, Any]]:
         return tomllib.load(fh).get("files", {})
 
 
-def _windows(size: int) -> list[int]:
-    """Byte offsets to sniff from, for a file of this size."""
-    if size <= SNIFF_CAP:
-        return [0]
-    # Evenly spaced, last one ending at EOF. The middle windows land mid-record
-    # and `sniff_one` trims to the next newline, which costs one line each.
-    span = size - SNIFF_CAP
-    return [round(span * i / (WINDOWS - 1)) for i in range(WINDOWS)]
+def _doubts(shape: dict[str, Any], stats: dict[str, Any],
+            duckdb: dict[str, Any]) -> list[str]:
+    """Signs that the dialect may be wrong although no sniffer contradicts it.
+
+    They are recorded for every file. Whether they send a file to review is
+    decided by `--review`.
+    """
+    out = []
+    if not shape["delimiter_found"]:
+        out.append("no_delimiter")
+    if stats["errors"]:
+        out.append("parse_errors")
+    if stats["unterminated_quote"]:
+        out.append("unterminated_quote")
+    if shape["delimiter_found"] and stats["consistent_bytes_share"] < MIN_CONSISTENT:
+        out.append("ragged")
+    common = stats["common_field_count"]
+    if any(part["records"] and part["common_field_count"] != common
+           for part in stats.get("parts", [])):
+        out.append("drift")
+    # DuckDB's two answers for a file it could not make sense of: a pipe where
+    # the file has none, and a single column where we found several.
+    if (duckdb.get("Delimiter") == "|" and duckdb.get("head_has_pipe") is False) or (
+            duckdb.get("n_columns") == 1 and shape["delimiter_found"]):
+        out.append("duckdb_gave_up")
+    return out
 
 
 def sniff_one(job: tuple[str, str, int, tuple[str, ...]]) -> dict[str, Any]:
-    """Every sniffer's verdict for one downloaded file, plus the whole-file scan.
+    """Every sniffer's verdict for one downloaded file.
 
     Runs in a worker process: the sniffers are CPU-bound and the GIL would
     otherwise serialise them behind each other. Takes paths rather than bytes
     so nothing large crosses the process boundary.
+
+    Our own sniffer reads the whole file. Its dialect is the file's dialect
+    (`dialects.settle`), and its counts are kept under `stats` to explain
+    benchmark results with later.
     """
     key, path_str, size, which = job
-    from . import sniffers
+    from . import features, sniffers
 
     path = Path(path_str)
-    offsets = _windows(size)
-    record: dict[str, Any] = {"content_key": key, "windows": len(offsets)}
-    views: dict[str, dict[str, Any]] = {}
-
-    heads: list[bytes] = []
+    record: dict[str, Any] = {"content_key": key}
     with path.open("rb") as fh:
-        for offset in offsets:
-            fh.seek(offset)
-            buf = fh.read(SNIFF_CAP)
-            if offset:
-                # Mid-file, so the read opened inside a record. Dropping to the
-                # next newline costs one line and stops every window past the
-                # first from reporting a short row it invented.
-                cut = buf.find(b"\n")
-                buf = buf[cut + 1:] if 0 <= cut < len(buf) - 1 else buf
-            heads.append(buf)
-    head = heads[0]
+        head = fh.read(SNIFF_CAP)
+        fh.seek(max(size - 1, 0))
+        last = fh.read(1)
 
-    # `size` is the real file size throughout, never the window's. `describe`
-    # reads `size <= len(head)` as "this sample reached the end" and drops its
-    # last line as a fragment otherwise -- so passing the window length would
-    # tell it a 16 MiB slice of a 2 GB file was the whole thing, and it would
-    # describe a truncated final record as a short row.
-    in_memory = tuple(n for n in which if n != "duckdb")
-    raw = sniffers.run(head, size, which=in_memory) if in_memory else {}
+    # `size` is the real file size, never the sample's: it is how a sniffer
+    # knows that a 16 MiB sample of a 2 GB file ends in a cut off record.
+    sample = sniffers.Sample(head, size)
+    in_memory = tuple(n for n in which if n not in ("duckdb", "custom"))
+    raw = sniffers.run_sample(sample, which=in_memory) if in_memory else {}
+    stats: dict[str, Any] = {}
+    if "custom" in which:
+        try:
+            out = features.run(None, sample.enc, path=path, parts=PARTS)
+            raw["custom"] = features.shape(
+                out, sample.enc, last in (b"\n", b"\r")).as_dict()
+            stats = out["stats"]
+            record["detection"] = out["detection"]
+        except Exception as exc:                            # noqa: BLE001
+            raw["custom"] = {"error": f"{type(exc).__name__}: {exc}"}
     if "duckdb" in which:
-        # The real path: no temp copy, and no truncation for DuckDB to trip on.
-        raw["duckdb"] = sniffers.duckdb_path(path, has_pipe=b"|" in head)
+        # The real path where the bytes are already UTF-8: no temp copy, and
+        # no truncation for DuckDB to trip on. Other encodings go through the
+        # head converted to UTF-8.
+        raw["duckdb"] = sniffers.duckdb_file(path, sample)
 
     views = dialects.normalise(raw)
-    merged = dialects.consensus(views)
+    settled = dialects.settle(
+        views, head, raw.get("custom", {}).get("delimiter_found", True))
     record["sniffers"] = views
-    record["dialect"] = merged["dialect"]
-    record["agreement"] = merged["agreement"]
-    record["contested"] = merged["contested"]
+    record["dialect"] = settled["dialect"]
+    record["agreement"] = settled["agreement"]
+    record["contested"] = settled["contested"]
+    # Failures kept apart from the views: there they would be all-None, which
+    # reads exactly like a sniffer with no opinion.
+    record["sniffer_errors"] = dialects.errors(raw)
+    record["doubts"] = _doubts(raw["custom"], stats, raw.get("duckdb") or {}) if stats else []
 
-    # Taken off `custom` rather than recomputed: it already ran
-    # `validate.probe_encoding` over this exact window, and a second call with
-    # its own fallbacks is a second opinion that could differ from the one the
-    # index and the selectors were built on.
-    own = sniffers.verdict(raw, "custom")
+    # The harness converts the file to UTF-8 from `bom`, `wide` or `detected`,
+    # in that order, before it is parsed.
+    enc = sample.enc
     record["encoding"] = {
-        "class": own.get("encoding_class"), "detected": own.get("encoding"),
-        "bom": own.get("bom"), "wide": own.get("wide_encoding"),
-        "magic": own.get("magic_kind"), "control_frac": own.get("control_frac"),
+        "class": enc.encoding_class, "detected": enc.encoding,
+        "bom": enc.bom, "wide": enc.wide,
+        "magic": enc.magic, "control_frac": round(enc.control_frac, 5),
         "chardet": sniffers.verdict(raw, "chardet").get("encoding"),
     }
-
-    # The later windows exist to contradict the first one. Only the delimiter
-    # is compared: it is the field every sniffer has an opinion about and the
-    # one whose drift makes a file unparseable under a single config.
-    if len(offsets) > 1 and "custom" in which:
-        tail = [sniffers.run(buf, size, which=("custom",))
-                .get("custom", {}).get("delimiter") for buf in heads[1:]]
-        first = record["dialect"]["delimiter"]
-        record["window_delimiters"] = [first, *tail]
-        if any(d != first for d in tail if d):
-            record["contested"] = sorted({*record["contested"], "delimiter"})
-            record["drift"] = True
-
-    record["consistency"] = dialects.consistency(
-        path, record["dialect"]["delimiter"], record["dialect"]["quote"],
-        record["dialect"]["comment"])
+    record["stats"] = stats
     return record
 
 
@@ -188,11 +197,13 @@ def _start_context():
 
 def build(name: str, members: list[dict[str, Any]], provenance: dict[str, Any],
           which: tuple[str, ...] = dialects.DIALECT_SNIFFERS + ("chardet",),
-          procs: int = 0, on_event: Any = None) -> Path:
+          procs: int = 0, on_event: Any = None,
+          review: str = "disagreements") -> Path:
     """Sniff every file of a dataset and write `datasets/<name>.json`.
 
     `members` is the dataset's kept downloads; `provenance` is how it was
-    drawn. Both come from `download`, which owns that bookkeeping.
+    drawn. Both come from `download`, which owns that bookkeeping. `review`
+    decides which files are queued for a manual check, see `needs_review`.
     """
     emit = on_event or (lambda *a, **k: None)
     jobs = []
@@ -236,7 +247,7 @@ def build(name: str, members: list[dict[str, Any]], provenance: dict[str, Any],
         "dataset": provenance | {
             "name": name, "files": len(files),
             "bytes": sum(r["size"] for r in members),
-            "sniffers": list(which), "sniff_cap": SNIFF_CAP,
+            "sniffers": list(which), "sniff_cap": SNIFF_CAP, "review": review,
             "sniffed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "sniff_seconds": round(time.monotonic() - started, 1),
         },
@@ -246,31 +257,51 @@ def build(name: str, members: list[dict[str, Any]], provenance: dict[str, Any],
     }
     out.write_text(json.dumps(payload, indent=1, sort_keys=False) + "\n",
                    encoding="utf-8")
-    write_review(files, name)
+    write_review(files, name, review)
     return out
 
 
-def needs_review(files: dict[str, Any]) -> dict[str, Any]:
-    """Files whose dialect nothing settled, minus those already decided.
+# Below this share of bytes in records with the common field count, a file is
+# marked as ragged (see `_doubts`).
+MIN_CONSISTENT = 0.95
 
-    Three ways to land here, and they are different problems: the sniffers
-    split on a field, none of them found a delimiter at all, or one dialect
-    does not describe the whole file. The last is the one a head sample can
-    never raise by itself.
+
+def needs_review(files: dict[str, Any],
+                 mode: str = "disagreements") -> dict[str, Any]:
+    """Files whose dialect should be checked by hand, minus those already
+    decided in `overrides.toml`.
+
+    A file without a dialect (our sniffer failed on it) is always queued: the
+    harness cannot run it. Beyond that, `mode` decides:
+
+      * "disagreements": only files where CleverCSV or DuckDB found something
+        else than our sniffer (`contested`, see `dialects.settle`).
+      * "all": also files where a sniffer failed, and files with `doubts`:
+        no delimiter found, parse errors, ragged records, a field count that
+        changes within the file, or a give-up answer from DuckDB.
     """
     decided = set(overrides())
     out = {}
     for key, entry in files.items():
         if key in decided or entry.get("missing"):
             continue
-        share = (entry.get("consistency") or {}).get("modal_share")
-        if (entry.get("contested") or entry["dialect"]["delimiter"] is None
-                or (share is not None and share < 0.95)):
+        flagged = entry.get("contested") or entry["dialect"]["delimiter"] is None
+        if mode == "all":
+            flagged = flagged or entry.get("sniffer_errors") or entry.get("doubts")
+        if flagged:
             out[key] = entry
     return out
 
 
-def write_review(files: dict[str, Any], name: str) -> Path:
+def _vote(value: Any) -> str:
+    """A view's field for the review file: `none` is an answer, `?` is none."""
+    if value is None:
+        return "?"
+    return "none" if value == dialects.NONE else repr(value)
+
+
+def write_review(files: dict[str, Any], name: str,
+                 mode: str = "disagreements") -> Path:
     """Scaffold `<name>.review.toml`: one commented block per unsettled file.
 
     Generated and disposable, and a *different file* from `overrides.toml` on
@@ -278,12 +309,12 @@ def write_review(files: dict[str, Any], name: str) -> Path:
     one-way and regenerating can never overwrite a decision. That separation is
     the whole reason the tool needs no TOML writer for the file that matters.
     """
-    queue = needs_review(files)
+    queue = needs_review(files, mode)
     out = review_path(name)
     ROOT.mkdir(parents=True, exist_ok=True)
     lines = [
-        f"# Files in dataset {name!r} whose dialect the sniffers did not",
-        "# settle. Generated -- this file is rewritten every time the dataset",
+        f"# Files in dataset {name!r} whose dialect should be checked by hand",
+        f"# (--review {mode}). Generated -- this file is rewritten every time the dataset",
         f"# is built. Decide one, then move its block to {OVERRIDES.name},",
         "# which is never written by the tool and is shared by every dataset.",
         "# A block is the file's full dialect: a missing key means none.",
@@ -295,16 +326,23 @@ def write_review(files: dict[str, Any], name: str) -> Path:
         d = entry["dialect"]
         lines.append(f"# {entry['repo']}/{entry['path']}  ({entry['size']:,} B)")
         for sniffer, view in (entry.get("sniffers") or {}).items():
-            lines.append(f"#   {sniffer:<10} delimiter={view['delimiter']!r} "
-                         f"quote={view['quote']!r} comment={view['comment']!r}")
-        con = entry.get("consistency") or {}
-        if con.get("modal_share") is not None:
-            lines.append(f"#   whole file  {con['records']:,} records, "
-                         f"{con['modal_fields']} fields on "
-                         f"{con['modal_share']:.1%} of them")
-        if entry.get("drift"):
-            lines.append(f"#   DRIFT       windows disagree: "
-                         f"{entry['window_delimiters']}")
+            lines.append(f"#   {sniffer:<10} " + " ".join(
+                f"{f}={_vote(view[f])}"
+                for f in ("delimiter", "quote", "escape", "comment")))
+        if entry.get("contested"):
+            lines.append(f"#   CONTESTED   {', '.join(entry['contested'])}")
+        for sniffer, err in sorted((entry.get("sniffer_errors") or {}).items()):
+            lines.append(f"#   ERROR       {sniffer}: {err}")
+        if entry.get("doubts"):
+            lines.append(f"#   DOUBTS      {', '.join(entry['doubts'])}")
+        stats = entry.get("stats") or {}
+        if stats:
+            lines.append(
+                f"#   whole file  {stats['records']:,} records, "
+                f"{stats['common_field_count']} fields on "
+                f"{stats['common_field_count_share']:.1%} of them, "
+                f"{stats['errors']:,} parse errors, "
+                f"{stats['quoted_fields']:,} quoted fields")
         lines.append(f"# [files.\"{key}\"]")
         for field in dialects.FIELDS:
             # TOML has no null: an override is a full dialect and a missing key

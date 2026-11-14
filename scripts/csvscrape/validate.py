@@ -11,8 +11,9 @@ from __future__ import annotations
 
 import codecs
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 # Checked against the first bytes of the file. A .csv extension is a claim, not
 # evidence, and archives mislabelled this way are common in scraped data.
@@ -105,6 +106,11 @@ class Encoding:
     magic: str | None
     wide: str | None
     control_frac: float
+    # charset_normalizer's own answer, verbatim (raw name, language, BOM flag,
+    # multi-byte ratio), so the `charset_normalizer` sniffer can record it
+    # without running the detector a second time over the same bytes. None
+    # when the detector was skipped because a BOM or NUL parity settled it.
+    detector: dict[str, Any] | None = field(default=None, compare=False)
 
     @property
     def codec(self) -> str:
@@ -115,6 +121,12 @@ class Encoding:
         delimiter structure is intact, which is all the dialect sniffers need.
         """
         return self.bom or self.wide or self.encoding or "latin-1"
+
+    @property
+    def encoding_class(self) -> str:
+        """`encoding_class` of the strongest observation: BOM, then NUL
+        parity, then the detector -- the same precedence as `codec`."""
+        return encoding_class(self.bom or self.wide or self.encoding)
 
     @property
     def looks_binary(self) -> bool:
@@ -152,14 +164,63 @@ def probe_encoding(head: bytes) -> Encoding:
     wide = _wide_encoding(head)
     control = _control_frac(head)
 
-    encoding = None
+    encoding = detector = None
     if bom is None and wide is None:
-        from charset_normalizer import from_bytes
-
-        best = from_bytes(head).best()
-        encoding = canonical_encoding(best.encoding) if best else None
+        detector = charset_normalizer_verdict(_whole_utf8_chars(head))
+        raw = detector["encoding"]
+        encoding = canonical_encoding(raw) if raw else None
     return Encoding(encoding=encoding, bom=bom, magic=magic, wide=wide,
-                    control_frac=control)
+                    control_frac=control, detector=detector)
+
+
+def _whole_utf8_chars(head: bytes) -> bytes:
+    """`head` without a UTF-8 sequence cut off by the end of the sample.
+
+    Heads are cut at a byte count, so a UTF-8 file's head can end inside a
+    character. charset_normalizer decodes strictly, and that one partial
+    character rules UTF-8 out: a 512 KB head that is UTF-8 throughout comes
+    back as cp1250 or None. GraphQL heads never have this, since
+    `client._blob_body` drops the partial character; range-request and Kaggle
+    heads end at exactly HEAD_BYTES.
+
+    Only the detector sees the trimmed bytes. On a file that is not UTF-8 the
+    trim costs it at most three bytes, which changes nothing.
+    """
+    for back in range(1, min(4, len(head)) + 1):
+        byte = head[-back]
+        if byte < 0x80:
+            return head
+        if byte >= 0xC0:
+            need = 2 if byte < 0xE0 else 3 if byte < 0xF0 else 4
+            return head[:-back] if back < need else head
+    return head
+
+
+def charset_normalizer_verdict(head: bytes) -> dict[str, Any]:
+    """charset_normalizer's best match, as the raw fields it reports."""
+    from charset_normalizer import from_bytes
+
+    best = from_bytes(head).best()
+    if best is None:
+        return {"encoding": None}
+    return {"encoding": best.encoding, "language": best.language,
+            "bom": best.bom, "multi_byte_usage": round(best.multi_byte_usage, 4)}
+
+
+def decode(head: bytes, enc: Encoding) -> str:
+    """The sample as text, the one decoding every dialect sniffer reads.
+
+    `errors="replace"` because a sniffer needs the structure, not every glyph:
+    a mislabelled byte becomes one U+FFFD and the delimiters around it stay
+    put. A BOM is dropped -- `utf-8-sig` eats its own, but the UTF-16/32
+    codecs named by byte order leave U+FEFF at the front, where it would read
+    as part of the first header field.
+    """
+    try:
+        text = head.decode(enc.codec, errors="replace")
+    except (LookupError, TypeError):
+        text = head.decode("latin-1", errors="replace")
+    return text.lstrip("﻿")
 
 
 def canonical_encoding(name: str) -> str:

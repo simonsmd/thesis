@@ -24,6 +24,7 @@ fn main() {
         max_size: None,
         min_size: None,
         encoding: Vec::new(),
+        file_encoding: None,
         datasets_dir: harness::dataset::default_datasets_dir(),
         corpus: harness::dataset::default_corpus_dir(),
         dialect: Default::default(),
@@ -51,7 +52,7 @@ fn main() {
 }
 
 fn check_file(input: &harness::inputs::Input) -> Result<(), Failed> {
-    let data = std::fs::read(&input.path).map_err(|e| format!("{}: {e}", input.path.display()))?;
+    let data = input.read()?;
     let report = check::check(&parsers::reference(), &parsers::all(), &input.dialect, &data, &[Options::default()]);
     let failures: Vec<String> = report
         .unexpected_mismatches()

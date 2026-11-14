@@ -55,6 +55,8 @@ _HEARTBEAT = 300.0
 # throughput collapses late in a long run, so the rate shown on the line and in
 # the heartbeat is a trailing window, sized to the heartbeat.
 _RATE_WINDOW = _HEARTBEAT
+# Seconds over which `probe --resniff` measures its current speed.
+_RESNIFF_WINDOW = 10.0
 
 
 def _fmt_seconds(seconds: float) -> str:
@@ -97,6 +99,9 @@ class Reporter:
         # (monotonic, done) readings inside `_RATE_WINDOW`, for the rate that
         # is shown as against the one the ETA is built on. See `_observe`.
         self._samples: collections.deque[tuple[float, int]] = collections.deque()
+        # (monotonic, sniffed) readings of a `probe --resniff` run.
+        self._resniff: collections.deque[tuple[float, int]] = collections.deque()
+        self._resniff_start = (0.0, 0)
 
     def __call__(self, event: str, **f: Any) -> None:
         # An interrupted pass leaves daemon workers running after the summary
@@ -341,6 +346,26 @@ class Reporter:
         # Transient: what the sniffers could not settle is written to
         # <name>.review.toml.
         self._transient(f"  sniffing [{done:,}/{total:,}]")
+
+    def _on_resniff(self, done: int = 0, sniffed: int = 0, not_cached: int = 0,
+                    **_: Any) -> None:
+        # Two speeds, in sniffed heads per second: over the last few seconds,
+        # which shows what the run is doing right now, and since the start,
+        # which is what the remaining time depends on.
+        now = time.monotonic()
+        if not self._resniff:
+            self._resniff_start = (now, sniffed)
+        self._resniff.append((now, sniffed))
+        while len(self._resniff) > 2 and self._resniff[0][0] < now - _RESNIFF_WINDOW:
+            self._resniff.popleft()
+
+        def speed(since: tuple[float, int]) -> float:
+            return (sniffed - since[1]) / max(now - since[0], 1e-6)
+
+        self._transient(
+            f"  sniffing again: {done:,} records read · {sniffed:,} sniffed · "
+            f"{not_cached:,} not in the cache · {speed(self._resniff[0]):,.0f}/s "
+            f"now · {speed(self._resniff_start):,.0f}/s average")
 
     def _on_round(self, n: int = 0, wanted: int = 0, drawn: int = 0, **_: Any) -> None:
         self._line(f"round {n}: need {wanted:,} more, drew {drawn:,} candidates")

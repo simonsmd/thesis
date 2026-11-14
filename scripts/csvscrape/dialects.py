@@ -13,15 +13,26 @@ Sniffer specifics:
     two lines.
 
 FIELDS is the parser's `Config`, one JSON key per struct field, and every
-normaliser returns exactly it with None wherever that sniffer has no opinion.
-`Shape` was named to match the struct, so `custom` is already in this
-vocabulary and its normaliser only has to handle the one place the two models
-genuinely differ -- see `from_custom`.
+normaliser returns exactly it. A view keeps three answers apart:
+
+  * a byte -- the sniffer found this character;
+  * `NONE` -- the sniffer looked and says there is no such character;
+  * `None` -- the sniffer has no opinion on the field (it does not model it,
+    the field does not apply, or the sniffer failed).
+
+`NONE` is an answer like any byte, so "no quote" from one sniffer against `"`
+from another contests the field. `None` is not an answer. Sniffer failures are not in
+the views at all -- `errors` collects them so a failed sniffer can send a file
+to review instead of quietly becoming an abstention.
+
+`features.Shape` uses the struct's names, so `custom` is already in this
+vocabulary.
+
+The dialect of a file is `custom`'s. The other two are used to find files
+worth a second look, see `settle`.
 """
 from __future__ import annotations
 
-import collections
-from pathlib import Path
 from typing import Any
 
 # One key per field of the parser's `Config`, in its order. `quote_style` and
@@ -43,11 +54,20 @@ DIALECT_SNIFFERS = ("custom", "clevercsv", "duckdb")
 # so it has to be recognised rather than trimmed.
 _NOTHING = ("", "(empty)", "\\0")
 
+# A sniffer's explicit "there is no such character", as stored in a view. Four
+# characters, so it cannot be mistaken for a byte (one character); it never
+# reaches a merged dialect, where "none" is spelled null as the parser reads it.
+NONE = "none"
+
+# The character fields a sniffer can answer `NONE` for. The terminator is not
+# one: every file has one, and a sentinel there is a failure to say which.
+_CHARS = ("delimiter", "quote", "escape", "comment")
+
 _EMPTY: dict[str, Any] = dict.fromkeys(FIELDS)
 
 
 def byte(value: Any) -> str | None:
-    """One character that fits in a byte, or None.
+    """One character that fits in a byte, `NONE`, or None.
 
     The parser's fields are `u8`, and the manifest stores them as one-character
     strings so that `";"` and `"\\t"` stay readable in a diff and in an override
@@ -56,36 +76,46 @@ def byte(value: Any) -> str | None:
     arrives here as the character of the same ordinal and goes back to that
     byte on the Rust side.
 
-    Anything that is not exactly one such character -- a sentinel, a multi-byte
-    character, a codepoint above 0xFF -- is no opinion rather than a guess.
+    A tool's spelling of "there is none" (`_NOTHING`) is `NONE`, an answer.
+    Anything else that is not exactly one such character -- a multi-byte
+    character, a codepoint above 0xFF, a non-string -- is no opinion rather
+    than a guess.
     """
-    if not isinstance(value, str) or value in _NOTHING:
+    if not isinstance(value, str):
         return None
+    if value in _NOTHING:
+        return NONE
     if len(value) != 1 or ord(value) > 0xFF:
         return None
     return value
 
 
+def _found(value: Any) -> str | None:
+    """`byte` for a sniffer whose missing value means "looked, found none".
+
+    `custom` reports an absent character as None rather than a sentinel string;
+    it always looks for every character it reports, so None from it is an
+    answer, not an abstention.
+    """
+    return NONE if value is None else byte(value)
+
+
 def from_custom(verdict: dict[str, Any]) -> dict[str, Any]:
     """This project's own sniffer, which already speaks the struct's language.
 
-    One genuine difference to reconcile: `Shape.quote_style` has a third value
-    `"none"` for "quoting is off", which the parser expresses by `quote` being
-    `None` instead. Carrying both would put a contradiction in the manifest --
-    a quote character next to a quote style saying there is none -- so the
-    redundant degree of freedom is collapsed here, in the direction the parser
-    can represent.
+    Its record (`features.Shape`) carries the dialect under the names of
+    FIELDS, except for the terminator: `terminator` there is the line ending
+    the file mostly uses, and `record_terminator` is the parser setting.
+
+    A missing character is None in the record. The sniffer looks for every
+    character it reports, so that is an answer (`NONE`), not "no opinion".
     """
     if not verdict or verdict.get("error"):
         return dict(_EMPTY)
     out = {f: verdict.get(f) for f in FIELDS}
-    for field in ("delimiter", "quote", "escape", "comment"):
-        out[field] = byte(out[field])
-    if verdict.get("quote_style") == "none" or out["quote"] is None:
-        out["quote"] = None
-        out["quote_style"] = None
-        out["quotes_in_unquoted_fields"] = None
-    out["terminator"] = _terminator(verdict.get("terminator"))
+    for field in _CHARS:
+        out[field] = _found(out[field])
+    out["terminator"] = _terminator(verdict.get("record_terminator"))
     return out
 
 
@@ -94,7 +124,8 @@ def from_clevercsv(verdict: dict[str, Any]) -> dict[str, Any]:
 
     It has no notion of a terminator, a comment character or a quoting style,
     so those stay None rather than being defaulted -- a sniffer that was not
-    asked must not get a vote.
+    asked must not get a vote. Its `""` is an answer (`NONE`): it looked for a
+    quote and found none.
     """
     if not verdict or verdict.get("error"):
         return dict(_EMPTY)
@@ -106,23 +137,23 @@ def from_clevercsv(verdict: dict[str, Any]) -> dict[str, Any]:
 def from_duckdb(verdict: dict[str, Any]) -> dict[str, Any]:
     """DuckDB, whose column names are capitalised and whose nulls are strings.
 
-    `Escape` is dropped when it equals `Quote`: DuckDB reports `"` as the
-    escape character for ordinary doubled-quote files, which is RFC 4180
-    doubling rather than an escape character, and the parser has a separate
-    `double_quote_escape` flag for it. Recording it as `escape` would configure
-    the parser to treat a closing quote as an escape.
+    `Escape` equal to `Quote` is not an escape character: DuckDB reports `"`
+    as the escape for ordinary doubled-quote files, which is RFC 4180 doubling,
+    and the parser has a separate `double_quote_escape` flag for it. Recording
+    it as `escape` would configure the parser to treat a closing quote as an
+    escape, so it is "no escape character" plus the flag.
     """
     if not verdict or verdict.get("error"):
         return dict(_EMPTY)
     quote = byte(verdict.get("Quote"))
     escape = byte(verdict.get("Escape"))
-    doubled = escape is not None and escape == quote
+    doubled = escape not in (None, NONE) and escape == quote
     return dict(
         _EMPTY,
         delimiter=byte(verdict.get("Delimiter")),
         terminator=_terminator(verdict.get("NewLineDelimiter")),
         quote=quote,
-        escape=None if doubled else escape,
+        escape=NONE if doubled else escape,
         double_quote_escape=True if doubled else None,
         comment=byte(verdict.get("Comment")),
     )
@@ -143,6 +174,7 @@ def _terminator(value: Any) -> str | None:
     being narrowed to a three-way enum it is not.
     """
     if not isinstance(value, str) or value in _NOTHING:
+        # No file lacks a terminator, so a sentinel here is no opinion.
         return None
     lowered = value.lower()
     if lowered in ("crlf", "\\r\\n", "\r\n"):
@@ -160,147 +192,69 @@ def normalise(record: dict[str, Any]) -> dict[str, dict[str, Any]]:
             for name in DIALECT_SNIFFERS if name in record}
 
 
-def consensus(views: dict[str, dict[str, Any]]) -> dict[str, Any]:
-    """Merge the normalised views field by field, and say how it went.
+def errors(record: dict[str, Any]) -> dict[str, str]:
+    """Every sniffer in a raw record that failed, with what it said.
 
-    A plain majority of the sniffers that hold an opinion on that field, with
-    `custom` breaking ties. Abstention is not a vote -- CleverCSV says nothing
-    about comment characters, and counting that silence as "no comment
-    character" would let a sniffer that was never asked outvote one that was.
-
-    `agreement` counts votes for the winning *delimiter* specifically, keeping
-    it the same number the index's `agreement` column carries, so a dataset and
-    the pool it was drawn from can be compared on it. `contested` names every
-    field the sniffers split on, which is what a review queue is built from.
-
-    Returns the dialect alongside its own provenance rather than as a bare
-    dict: a consensus that nothing voted for and one that three tools agreed on
-    are different facts, and the manifest should not have to be re-derived to
-    tell them apart.
+    Covers every sniffer that ran, the encoding detectors too: a failed sniffer
+    leaves an all-None view that looks exactly like one with no opinion, and a
+    dialect settled without it was settled on less evidence than it appears.
+    A sniffer that returned nothing at all counts as failed.
     """
-    dialect: dict[str, Any] = {}
-    contested: list[str] = []
-    agreement = 0
-    for field in FIELDS:
-        votes = collections.Counter(
-            view[field] for view in views.values() if view.get(field) is not None
-        )
-        if not votes:
-            dialect[field] = None
-            continue
-        top = votes.most_common()
-        best, count = top[0]
-        tied = [value for value, n in top if n == count]
-        if len(tied) > 1:
+    out = {}
+    for name, verdict in record.items():
+        if not isinstance(verdict, dict) or not verdict:
+            out[name] = "no_output"
+        elif verdict.get("error"):
+            out[name] = str(verdict["error"])
+    return out
+
+
+# The fields the other sniffers are compared on: the ones they report.
+COMPARED = ("delimiter", "quote", "escape", "comment")
+
+
+def settle(views: dict[str, dict[str, Any]], sample: bytes = b"",
+           delimiter_found: bool = True) -> dict[str, Any]:
+    """The dialect of a file, and where the other sniffers disagree with it.
+
+    The dialect is `custom`'s: it is the only sniffer that knows every field
+    of the parser's `Config`. CleverCSV and DuckDB do not vote. They are a
+    check: `contested` lists the fields of COMPARED where one of them gives a
+    different answer, which is what sends a file to manual review.
+
+    Two things are not a disagreement:
+
+      * None, a sniffer without an opinion on the field.
+      * A character that does not occur in `sample`. The sniffer cannot have
+        found it there, so it is the tool's default or its give-up answer
+        (DuckDB reports `"` as the quote of a file without any, and `|` for a
+        file it could not make sense of).
+
+    `NONE` ("there is no such character") is an answer like any other, and it
+    contests a field where `custom` found a character.
+
+    `delimiter_found` is False when `custom` found a single column. Its
+    dialect then has a comma, the parser needs some delimiter, and another
+    sniffer saying "no delimiter" agrees with that.
+
+    `agreement` is the number of sniffers, `custom` included, that name the
+    chosen delimiter.
+    """
+    own = views.get("custom") or _EMPTY
+    dialect = {f: None if own.get(f) == NONE else own.get(f) for f in FIELDS}
+    contested = []
+    for field in COMPARED:
+        for name, view in views.items():
+            theirs = view.get(field)
+            if name == "custom" or theirs is None or theirs == own.get(field):
+                continue
+            if field == "delimiter" and not delimiter_found and theirs == NONE:
+                continue
+            if theirs != NONE and sample and theirs.encode("latin-1") not in sample:
+                continue
             contested.append(field)
-            own = views.get("custom", {}).get(field)
-            best = own if own in tied else sorted(tied)[0]
-            count = votes[best]
-        elif len(votes) > 1:
-            contested.append(field)
-        dialect[field] = best
-        if field == "delimiter":
-            agreement = count
+            break
+    delimiter = own.get("delimiter")
+    agreement = 0 if delimiter is None else sum(
+        1 for view in views.values() if view.get("delimiter") == delimiter)
     return {"dialect": dialect, "agreement": agreement, "contested": contested}
-
-
-def _outside(line: bytes, delim: bytes, quote: bytes, inside: bool) -> tuple[int, bool]:
-    """Delimiters in this line that are *not* inside quotes, and the end state.
-
-    Splitting on the quote byte yields alternating outside/inside runs, so both
-    the selection and the counting stay in C. Doubled quotes need no special
-    case: `a,"x""y",b` splits to [`a,`, `x`, ``, `y`, `,b`] and the escape's
-    empty run lands on an even index where it contributes nothing.
-    """
-    parts = line.split(quote)
-    n = 0
-    for i in range(0 if not inside else 1, len(parts), 2):
-        n += parts[i].count(delim)
-    return n, inside ^ (len(parts) % 2 == 0)
-
-
-def consistency(path: Path, delimiter: str | None, quote: str | None,
-                comment: str | None = None, chunk: int = 1 << 22) -> dict[str, Any]:
-    """Stream the whole file and report whether one dialect describes all of it.
-
-    The only evidence in the manifest that is not another prefix guess. Every
-    sniffer here reads the front of a file -- CleverCSV hard-caps at 8 KiB,
-    DuckDB decides the dialect from its first buffer, and `custom` is given a
-    bounded window -- so a file whose dialect changes at 40 MB satisfies all
-    three, and only reading the rest of it says so.
-
-    Deliberately a scan and not a parse: every inner operation is a `bytes`
-    method rather than a Python loop over bytes, so the cost scales with
-    records rather than bytes and a whole-file pass stays affordable.
-
-    It is quote-aware and comment-aware all the same: otherwise a clean
-    `a,b,c` / `1,"x,y",3` file would score 50% and land in the review queue,
-    and so would a leading `# comment` block.
-
-    Reported as a histogram rather than a verdict: `modal_fields` and the share
-    of records agreeing with it. A clean file is a spike at one value, drift is
-    two clusters, and genuine raggedness is a tail. Calling any of those
-    "ragged" here would claim a parse this still does not do.
-    """
-    if delimiter is None:
-        return {"scanned": 0, "records": 0, "modal_fields": None,
-                "modal_share": None, "quotes": 0, "reason": "no_delimiter"}
-    delim = delimiter.encode("latin-1")
-    quote_byte = quote.encode("latin-1") if quote else None
-    comment_byte = comment.encode("latin-1") if comment else None
-    hist: collections.Counter = collections.Counter()
-    quotes = scanned = comments = 0
-    inside = False
-    pending = 0
-    remainder = b""
-
-    def take(line: bytes) -> None:
-        nonlocal inside, pending, comments
-        if comment_byte and not inside and not pending and line[:1] == comment_byte:
-            comments += 1
-            return
-        if quote_byte:
-            found, inside = _outside(line, delim, quote_byte, inside)
-        else:
-            found = line.count(delim)
-        pending += found
-        if not inside:
-            # The newline ended a record rather than sitting inside a quoted
-            # field, so the accumulated count is one row's worth.
-            hist[pending] += 1
-            pending = 0
-
-    with path.open("rb") as fh:
-        while True:
-            buf = fh.read(chunk)
-            if not buf:
-                break
-            scanned += len(buf)
-            if quote_byte:
-                quotes += buf.count(quote_byte)
-            # The chunk boundary almost never falls on a newline, so the
-            # trailing fragment is carried rather than counted as a short
-            # record.
-            lines = (remainder + buf).split(b"\n")
-            remainder = lines.pop()
-            for line in lines:
-                take(line.rstrip(b"\r") if not inside else line)
-    if remainder:
-        take(remainder.rstrip(b"\r"))
-    if inside:
-        # An unterminated quote runs to EOF; what it accumulated is one record.
-        hist[pending] += 1
-
-    total = sum(hist.values())
-    if not total:
-        return {"scanned": scanned, "records": 0, "modal_fields": None,
-                "modal_share": None, "quotes": quotes, "comments": comments}
-    mode, at_mode = hist.most_common(1)[0]
-    return {
-        "scanned": scanned,
-        "records": total,
-        "modal_fields": mode + 1,
-        "modal_share": round(at_mode / total, 4),
-        "quotes": quotes,
-        "comments": comments,
-    }

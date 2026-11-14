@@ -33,6 +33,7 @@ bytes dominate everything else on disk.
 """
 from __future__ import annotations
 
+import collections
 import multiprocessing
 import pathlib
 import queue
@@ -43,6 +44,7 @@ from concurrent.futures.process import BrokenProcessPool
 from typing import Any
 
 import polars as pl
+import zstandard
 
 from . import config, index, log, sniffers, validate
 from .blobstore import BlobStore
@@ -1038,12 +1040,129 @@ def run(gh: GitHub, limit: int | None = None,
     return stats
 
 
-def cached_head(record: dict[str, Any], cache_dir: str | None = None) -> bytes | None:
-    """Re-read a cached head so metadata can be recomputed without the network."""
-    loc = record.get("head_blob")
-    if not loc:
-        return None
-    return BlobStore(config.cache_root(cache_dir)).get(loc)
+def resniff(source: str, target: str = HEADS_LOG,
+            cache_dir: str | None = None,
+            which: tuple[str, ...] = ("custom",),
+            sniff_procs: int = config.SNIFF_PROCESSES,
+            limit: int | None = None, on_event: Any = None,
+            skip_unchanged: bool = False) -> dict[str, Any]:
+    """Sniff the heads of an earlier run again, from the cache instead of the
+    network, and write the results to the `target` log.
+
+    `source` is the heads log of the earlier run, moved aside first, e.g.
+    `data/heads` renamed to `data/heads-old` and passed as "heads-old". It
+    cannot simply be deleted: the cache is one big pile of bytes, and only the
+    `head_blob` entry of each record says where in it a head lies. The new
+    records carry it over, so once this has run through, the source log is
+    redundant.
+
+    Only the sniffers in `which` are run. What the others said is copied from
+    the old record, so that a change to our own sniffer does not cost a rerun
+    of the much slower CleverCSV and DuckDB.
+
+    `skip_unchanged` also keeps the old CleverCSV and DuckDB verdicts for
+    heads on which they would get the same input as before, see
+    `sniffers.run_changed`.
+
+    A record whose head is not in the cache is left out. Its file then counts
+    as not probed and the next ordinary `probe` fetches it from the network.
+    Records of failed fetches are copied, since a 404 still settles a file.
+
+    Can be interrupted (Ctrl-C) and run again: records are written in the
+    order of the source log, so a rerun finds the last record of the target in
+    the source and carries on after it. That only works while nothing else
+    writes to `target`, so finish this before the next ordinary `probe`.
+
+    The returned counts include `seconds` and `sniffed_per_s`, the average
+    speed of this run.
+    """
+    emit = on_event or (lambda *a, **k: None)
+    if source == target:
+        raise ValueError("resniff reads one log and writes another: move the "
+                         f"old {target!r} log aside and pass its new name")
+    store = BlobStore(config.cache_root(cache_dir))
+    log.seal_orphans(target)
+    # Where an earlier, interrupted run stopped: the last record it wrote.
+    # Counting records is not enough to find it in the source, because heads
+    # that were not in the cache have no record in the target.
+    written, last = 0, None
+    for record in log.read(target):
+        written, last = written + 1, (record.get("content_key"), record.get("ts"))
+    stats = {"skipped": 0, "sniffed": 0, "copied": 0, "not_cached": 0}
+    started = time.monotonic()
+    pool = _sniff_pool(sniff_procs, which)
+    # Sniffed in parallel but written in source order, see above. The window
+    # bounds how many heads are in memory at once.
+    window: collections.deque = collections.deque()
+    width = max(1, sniff_procs) * 4
+
+    def write_oldest(heads_log: log.Writer) -> None:
+        # Taken off the window only once it is written, so that an interrupt
+        # in between cannot lose the record.
+        old, verdicts = window[0]
+        if verdicts is not None:
+            # A future when there is a pool, the verdicts themselves without.
+            fresh = verdicts.result() if pool is not None else verdicts
+            old = old | fresh
+            old["agreement"] = sniffers.agreement(old)
+            stats["sniffed"] += 1
+        else:
+            stats["copied"] += 1
+        heads_log.write(old)
+        window.popleft()
+
+    try:
+        with log.Writer(target, rotate=config.HEADS_ROTATE) as heads_log:
+            try:
+                for n, old in enumerate(log.read(source)):
+                    if last is not None:
+                        # Still in the part an earlier run has dealt with. It
+                        # ends at the first record from position `written - 1`
+                        # on that is the last one written.
+                        if n >= written - 1 and (
+                                old.get("content_key"), old.get("ts")) == last:
+                            last = None
+                            # the speed is that of the sniffing alone
+                            started = time.monotonic()
+                        stats["skipped"] += 1
+                        continue
+                    if limit is not None and n - stats["skipped"] >= limit:
+                        break
+                    # The writer gives every record a new id.
+                    old.pop("rec_id", None)
+                    verdicts = None
+                    if old.get("fetched"):
+                        try:
+                            head = store.get(old["head_blob"])
+                        except (KeyError, OSError, zstandard.ZstdError):
+                            stats["not_cached"] += 1
+                            continue
+                        # Old verdicts that can be kept: the sniffer ran and did
+                        # not fail.
+                        have = tuple(
+                            name for name in which
+                            if skip_unchanged and old.get(name)
+                            and not old[name].get("error"))
+                        job = (sniffers.run_changed, head, old["size"], which, have)
+                        verdicts = (job[0](*job[1:]) if pool is None
+                                    else pool.submit(*job))
+                    window.append((old, verdicts))
+                    if len(window) >= width:
+                        write_oldest(heads_log)
+                    if n % 100 == 0:
+                        emit("resniff", done=n, sniffed=stats["sniffed"],
+                             not_cached=stats["not_cached"])
+            except KeyboardInterrupt:
+                # Stop reading, but still write what is being sniffed.
+                stats["interrupted"] = True
+            while window:
+                write_oldest(heads_log)
+    finally:
+        if pool is not None:
+            pool.shutdown(wait=True, cancel_futures=True)
+    stats["seconds"] = round(time.monotonic() - started, 1)
+    stats["sniffed_per_s"] = round(stats["sniffed"] / max(stats["seconds"], 0.1), 1)
+    return stats
 
 
 # The pass that fills each heads log, so an empty one can say what to run.
@@ -1144,9 +1263,9 @@ FLAT_FIELDS = (
     "delimiter", "quote", "quote_style", "quoting", "terminator",
     "comment", "escape", "double_quote_escape",
     "escape_in_unquoted_fields", "quotes_in_unquoted_fields",
-    "embedded_newline", "embedded_delimiter", "preamble",
-    "multi_table", "ragged_rows", "mixed_terminators",
-    "has_nul", "columns", "complete", "encoding", "encoding_class",
+    "embedded_newline", "embedded_delimiter", "preamble_records",
+    "ragged_rows", "mixed_terminators", "errors", "delimiter_found",
+    "has_nul", "common_field_count", "complete", "encoding", "encoding_class",
     "magic_kind", "control_frac", "wide_encoding",
 )
 
@@ -1175,6 +1294,8 @@ def _shape_dtype(name: str) -> pl.DataType:
     from .features import Shape
 
     base = Shape.__annotations__.get(name, "str").replace(" | None", "").strip()
+    if base == "list[int]":
+        return pl.List(pl.Int64)
     return _DTYPES.get({"str": str, "bool": bool, "int": int,
                         "float": float}.get(base, str), pl.String)
 
