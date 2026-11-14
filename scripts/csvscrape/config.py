@@ -23,7 +23,13 @@ COMPRESSION_SUFFIXES = (".gz", ".bz2", ".xz", ".zst", ".zip")
 
 # What the Parquet index exposes as the corpus universe, and so what `probe`
 # ever fetches. .tsv and .psv are the same grammar with a different delimiter
-# (both are in features.DELIMITERS), and nearly free in pool size.
+# (both are in features.DELIMITERS), and nearly free in pool size. The Kaggle
+# index uses the same list.
+#
+# .txt and .dat stay out: on Kaggle they are 42% of all files, and a sample of
+# the .txt ones was mostly object detection labels (space separated numbers,
+# often a single line), text, lists and config files; about 6% were comma,
+# tab, semicolon or pipe tables.
 #
 # .tab stays out: the extension is not specific to tabular data (guitar
 # tablature, editor state files), and admitting it would put files with no

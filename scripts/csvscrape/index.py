@@ -888,7 +888,12 @@ def build_kaggle(out: Path | None = None) -> Path:
         .rename({"names": "path", "keys": "content_key", "sizes": "size",
                  "crcs": "crc", "csizes": "csize", "methods": "method",
                  "offsets": "header_offset"})
+        # The same extensions as the GitHub index. The bundle log keeps the
+        # wider `KEEP_EXTENSIONS`, so widening this later is a rebuild here.
+        # Filtered before the collapse below, so content that is also a .csv
+        # elsewhere keeps that row.
         .filter(pl.col("path").is_not_null()
+                & _ext_filter(pl.col("path"))
                 & (pl.col("size") >= config.INDEX_MIN_BYTES))
         .with_columns(
             pl.lit("kaggle").alias("source"),

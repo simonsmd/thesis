@@ -947,6 +947,20 @@ class IndexBuild(unittest.TestCase):
         index.build_kaggle()
         self.assertEqual(index.kaggle_files().collect().height, 2)
 
+    def test_only_index_extensions_reach_the_index(self):
+        """Same content as a .txt and a .csv keeps the .csv row."""
+        from csvscrape import index
+
+        root = self._root()
+        self._write_bundles(root, [
+            self._record("one/d", [("labels.txt", b"0 0.5 0.5 0.1 0.1\n"),
+                                   ("a.dat", b"1 2\n"), ("same.txt", b"a,b\n")]),
+            self._record("two/d", [("same.csv", b"a,b\n")]),
+        ])
+        index.build_kaggle()
+        self.assertEqual(index.kaggle_files().select("path").collect()["path"].to_list(),
+                         ["same.csv"])
+
     def test_the_archive_coordinates_survive_into_the_index(self):
         """Without them a drawn row cannot be fetched at all."""
         from csvscrape import index
