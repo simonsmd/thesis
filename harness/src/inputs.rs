@@ -64,21 +64,21 @@ pub struct DialectArgs {
     pub terminator: Option<Terminator>,
     /// Quote character for `--file` inputs, or `none`.
     #[arg(long, value_parser = parse_optional_byte)]
-    pub quote: Option<Option<Byte>>,
+    pub quote: Option<OptionalByte>,
     #[arg(long)]
     pub quote_style: Option<QuoteStyle>,
     #[arg(long)]
     pub quotes_in_unquoted_fields: Option<bool>,
     /// Escape character for `--file` inputs, or `none`.
     #[arg(long, value_parser = parse_optional_byte)]
-    pub escape: Option<Option<Byte>>,
+    pub escape: Option<OptionalByte>,
     #[arg(long)]
     pub escape_in_unquoted_fields: Option<bool>,
     #[arg(long)]
     pub double_quote_escape: Option<bool>,
     /// Comment character for `--file` inputs, or `none`.
     #[arg(long, value_parser = parse_optional_byte)]
-    pub comment: Option<Option<Byte>>,
+    pub comment: Option<OptionalByte>,
 }
 
 impl DialectArgs {
@@ -103,7 +103,7 @@ impl DialectArgs {
             d.terminator = v;
         }
         if let Some(v) = self.quote {
-            d.quote = v;
+            d.quote = v.0;
         }
         if let Some(v) = self.quote_style {
             d.quote_style = Some(v);
@@ -112,7 +112,7 @@ impl DialectArgs {
             d.quotes_in_unquoted_fields = Some(v);
         }
         if let Some(v) = self.escape {
-            d.escape = v;
+            d.escape = v.0;
         }
         if let Some(v) = self.escape_in_unquoted_fields {
             d.escape_in_unquoted_fields = v;
@@ -121,7 +121,7 @@ impl DialectArgs {
             d.double_quote_escape = v;
         }
         if let Some(v) = self.comment {
-            d.comment = v;
+            d.comment = v.0;
         }
     }
 }
@@ -134,10 +134,15 @@ fn parse_byte(s: &str) -> Result<Byte, String> {
     }
 }
 
-fn parse_optional_byte(s: &str) -> Result<Option<Byte>, String> {
+/// A byte or `none`, as its own type: clap reads a plain `Option<Option<Byte>>` field as a flag
+/// with an optional value and panics on the type the value parser returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OptionalByte(pub Option<Byte>);
+
+fn parse_optional_byte(s: &str) -> Result<OptionalByte, String> {
     match s {
-        "none" => Ok(None),
-        _ => parse_byte(s).map(Some),
+        "none" => Ok(OptionalByte(None)),
+        _ => parse_byte(s).map(|b| OptionalByte(Some(b))),
     }
 }
 
@@ -383,6 +388,19 @@ impl InputArgs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dialect_flags_parse() {
+        #[derive(clap::Parser)]
+        struct Args {
+            #[command(flatten)]
+            dialect: DialectArgs,
+        }
+        let args = <Args as clap::Parser>::try_parse_from(["x", "--quote", "none", "--escape", "\\", "--comment", "#"]).unwrap();
+        assert_eq!(args.dialect.quote, Some(OptionalByte(None)));
+        assert_eq!(args.dialect.escape, Some(OptionalByte(Some(Byte(b'\\')))));
+        assert_eq!(args.dialect.comment, Some(OptionalByte(Some(Byte(b'#')))));
+    }
 
     #[test]
     fn sizes() {
