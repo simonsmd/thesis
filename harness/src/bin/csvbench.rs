@@ -96,6 +96,13 @@ struct RunArgs {
     /// Print one line per file and parser while running.
     #[arg(long, short)]
     verbose: bool,
+    /// After the run, compare it to this result file like `compare` does. Without a path, the
+    /// latest default-named result for the same datasets in `bench-data/`.
+    #[arg(long, num_args = 0..=1, require_equals = true, value_name = "PATH")]
+    baseline: Option<Option<PathBuf>>,
+    /// With `--baseline`, list files whose throughput changed by more than this many percent.
+    #[arg(long, default_value_t = 3.0)]
+    threshold: f64,
 }
 
 #[derive(clap::Args)]
@@ -197,14 +204,29 @@ fn run(args: RunArgs) -> Result<(), String> {
         }
     };
 
-    let path = args.output.clone().unwrap_or_else(|| {
-        let label = if selection.datasets.is_empty() {
-            "files".to_owned()
-        } else {
-            selection.datasets.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join("+")
-        };
-        Path::new(ROOT).join("bench-data").join(format!("{label}-{}.jsonl", system::compact_timestamp()))
-    });
+    let label = if selection.datasets.is_empty() {
+        "files".to_owned()
+    } else {
+        selection.datasets.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join("+")
+    };
+    let results_dir = Path::new(ROOT).join("bench-data");
+    // loaded before running, so that a bad baseline does not surface only after the whole run
+    let baseline = match &args.baseline {
+        None => None,
+        Some(path) => {
+            let path = match path {
+                Some(path) => path.clone(),
+                None => latest_result(&results_dir, &label)?,
+            };
+            let medians = load_medians(&path)?;
+            eprintln!("baseline {}", path.display());
+            Some((path, medians))
+        }
+    };
+    let path = args
+        .output
+        .clone()
+        .unwrap_or_else(|| results_dir.join(format!("{label}-{}.jsonl", system::compact_timestamp())));
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
@@ -420,8 +442,38 @@ fn run(args: RunArgs) -> Result<(), String> {
             }
         }
     }
+    if let Some((base_path, base)) = &baseline {
+        println!("\ncompared to {}:", base_path.display());
+        match print_comparison(base, &load_medians(&path)?, |_| true, args.threshold) {
+            Ok(()) => {}
+            // the run is written either way, so this is not an error of the run
+            Err(e) => println!("  {e}"),
+        }
+    }
     eprintln!("\nwrote {}", path.display());
     Ok(())
+}
+
+/// The newest result in `dir` named like a default output for `label`: `<label>-<time>.jsonl`.
+fn latest_result(dir: &Path, label: &str) -> Result<PathBuf, String> {
+    let entries = fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let is_timestamp = |t: &str| {
+        let (date, time) = t.split_at_checked(8).unwrap_or_default();
+        date.len() == 8
+            && time.len() == 7
+            && time.starts_with('-')
+            && date.bytes().chain(time.bytes().skip(1)).all(|b| b.is_ascii_digit())
+    };
+    entries
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .filter(|name| {
+            let time = name.strip_prefix(label).and_then(|n| n.strip_prefix('-')).and_then(|n| n.strip_suffix(".jsonl"));
+            time.is_some_and(is_timestamp)
+        })
+        // the timestamps sort in time order
+        .max()
+        .map(|name| dir.join(name))
+        .ok_or_else(|| format!("no previous `{label}` result in {} to compare to", dir.display()))
 }
 
 /// One parser on one file: its statistics, the iterations per sample and the samples; or the
@@ -557,8 +609,11 @@ fn cv(values: &[f64]) -> f64 {
     var.sqrt() / mean
 }
 
-/// Median throughput (parsed bytes/ns = GB/s) per `(file, parser)` from a result file.
-fn load_medians(path: &Path) -> Result<HashMap<(String, String), f64>, String> {
+/// Median throughput (parsed bytes/ns = GB/s) per `(file, parser)`.
+type Medians = HashMap<(String, String), f64>;
+
+/// The [`Medians`] of a result file.
+fn load_medians(path: &Path) -> Result<Medians, String> {
     let file = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut sizes: HashMap<String, f64> = HashMap::new();
     let mut throughputs: HashMap<(String, String), Vec<f64>> = HashMap::new();
@@ -590,12 +645,20 @@ fn load_medians(path: &Path) -> Result<HashMap<(String, String), f64>, String> {
 fn compare(args: CompareArgs) -> Result<(), String> {
     let base = load_medians(&args.base)?;
     let new = load_medians(&args.new)?;
+    let selected = |parser: &str| {
+        let included = args.parsers.parser.is_empty() || args.parsers.parser.iter().any(|g| parsers::glob(g, parser));
+        included && !args.parsers.exclude.iter().any(|g| parsers::glob(g, parser))
+    };
+    print_comparison(&base, &new, selected, args.threshold)
+}
 
+/// The change from `base` to `new` per parser, then the files that changed by more than
+/// `threshold` percent. Only parsers for which `selected` holds are compared.
+fn print_comparison(base: &Medians, new: &Medians, selected: impl Fn(&str) -> bool, threshold: f64) -> Result<(), String> {
     // ratios new/base per parser, over the files both measured
     let mut ratios: HashMap<&str, Vec<(&str, f64)>> = HashMap::new();
-    for ((file, parser), new_tp) in &new {
-        let included = args.parsers.parser.is_empty() || args.parsers.parser.iter().any(|g| parsers::glob(g, parser));
-        if !included || args.parsers.exclude.iter().any(|g| parsers::glob(g, parser)) {
+    for ((file, parser), new_tp) in new {
+        if !selected(parser) {
             continue;
         }
         if let Some(base_tp) = base.get(&(file.clone(), parser.clone())) {
@@ -623,15 +686,15 @@ fn compare(args: CompareArgs) -> Result<(), String> {
         );
     }
 
-    let threshold = args.threshold / 100.0;
+    let fraction = threshold / 100.0;
     let mut changed: Vec<(&str, &str, f64)> = names
         .iter()
         .flat_map(|name| ratios[name].iter().map(move |(file, r)| (*name, *file, *r)))
-        .filter(|(_, _, r)| (r - 1.0).abs() > threshold)
+        .filter(|(_, _, r)| (r - 1.0).abs() > fraction)
         .collect();
     if !changed.is_empty() {
         changed.sort_by(|a, b| a.2.total_cmp(&b.2));
-        println!("\nchanged by more than {}%:", args.threshold);
+        println!("\nchanged by more than {threshold}%:");
         for (parser, file, r) in changed {
             println!("  {:>+8.2}%  {:<40} {}", (r - 1.0) * 100.0, parser, short(file));
         }

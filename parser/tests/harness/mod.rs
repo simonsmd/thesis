@@ -11,11 +11,15 @@ use csv_parser::{
     bitshift::BitshiftDfa,
     class::ClassDfa,
     config::Config,
-    parser::{CompactionParser, Error, ZeroCopyParser, compaction, zerocopy},
+    dfa::Dfa,
+    parser::{CompactionParser, Error, PerState, Sets, Shared, ZeroCopyParser, compaction, zerocopy},
     reference::ReferenceDfa,
-    skip::{CmpOr, Native, NibbleMap, ScalarSkip, Skip},
+    classifier::{Classifier, CmpOr, Native, NibbleMap, u8x16, u8x32, u8x64},
     table::TableDfa,
 };
+
+#[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), target_feature = "avx2"))]
+use csv_parser::classifier::{Pcmpestr, Pcmpistr};
 
 pub type Parsed = Result<Vec<Vec<String>>, Error>;
 
@@ -39,13 +43,21 @@ pub fn try_parse(config: &Config, input: &[u8]) -> Parsed {
 
 /// [`try_parse`] with an explicit buffer size, to exercise refills in the
 /// middle of a record.
+///
+/// Every engine also runs with a field buffer of a single entry, which grows on
+/// the first record with more than one field.
 pub fn parse_with_capacity(config: &Config, input: &[u8], capacity: usize) -> Parsed {
-    let mut engines = engines(config, input, capacity).into_iter();
-    let (reference_name, reference) = engines.next().unwrap();
+    let mut defaults = engines(config, input, capacity, None).into_iter();
+    let (reference_name, reference) = defaults.next().unwrap();
     let expected = drive(reference);
 
     let expected_text = format!("{expected:?}");
-    let actual = engines.map(|(name, e)| (name, format!("{:?}", drive(e))));
+    let actual = defaults.map(|(name, e)| (name, format!("{:?}", drive(e))));
+    disagreements(&reference_name, &expected_text, actual);
+
+    let actual = engines(config, input, capacity, Some(1))
+        .into_iter()
+        .map(|(name, e)| (format!("{name} with 1 field end"), format!("{:?}", drive(e))));
     disagreements(&reference_name, &expected_text, actual);
 
     expected
@@ -54,7 +66,7 @@ pub fn parse_with_capacity(config: &Config, input: &[u8], capacity: usize) -> Pa
 /// Parse `input` up to the first error, then call `read_record` once more, and
 /// return both outcomes as text. Every engine must agree with the reference.
 pub fn read_after_error(config: &Config, input: &[u8]) -> (String, String) {
-    let mut engines = engines(config, input, DEFAULT_CAPACITY).into_iter();
+    let mut engines = engines(config, input, DEFAULT_CAPACITY, None).into_iter();
     let (reference_name, reference) = engines.next().unwrap();
     let expected = after_error(reference);
 
@@ -79,30 +91,94 @@ fn disagreements(reference: &str, expected: &str, actual: impl Iterator<Item = (
     );
 }
 
+/// The skipping `read_record` variants with one classifier and set, named
+/// `compaction-<variant>-<name>`.
+fn skipping<'a, D: Dfa + 'a, C: Classifier + 'a, M: Sets + 'a>(
+    name: &str,
+    config: &Config,
+    input: &'a [u8],
+    capacity: usize,
+    fields: usize,
+) -> [(String, Engine<'a>); 3] {
+    let new = || CompactionParser::<_, D>::with_capacity(input, config.clone(), capacity, fields);
+    let classifier = C::new(config);
+    let (mut simd, mut check) = (new(), new());
+    let mut zerocopy = ZeroCopyParser::<_, D>::with_capacity(input, config.clone(), capacity, fields);
+    [
+        (
+            format!("compaction-simd-{name}"),
+            Box::new(move || {
+                simd.read_record_simd(&classifier, M::default())
+                    .map(|r| r.map(|r| strings(r.iter())))
+            }) as Engine,
+        ),
+        (
+            format!("zerocopy-simd-{name}"),
+            Box::new(move || {
+                zerocopy
+                    .read_record_simd(&classifier, M::default())
+                    .map(|r| r.map(|r| strings(r.iter())))
+            }),
+        ),
+        (
+            format!("compaction-simd-check-{name}"),
+            Box::new(move || {
+                check
+                    .read_record_simd_check(&classifier, M::default())
+                    .map(|r| r.map(|r| strings(r.iter())))
+            }),
+        ),
+    ]
+}
+
+/// [`skipping`] for every classifier and width, with either set.
+macro_rules! skipping_for {
+    ($dfa:ty, $name:literal, $config:expr, $input:expr, $capacity:expr, $fields:expr) => {{
+        let mut engines = Vec::new();
+        macro_rules! sets {
+            ($skip:literal, $classifier:ty) => {
+                engines.extend(skipping::<$dfa, $classifier, Shared>(
+                    concat!($skip, "-shared/", $name), $config, $input, $capacity, $fields,
+                ));
+                engines.extend(skipping::<$dfa, $classifier, PerState>(
+                    concat!($skip, "-state/", $name), $config, $input, $capacity, $fields,
+                ));
+            };
+        }
+        sets!("cmp-or-16", CmpOr<u8x16<Native>>);
+        sets!("cmp-or-32", CmpOr<u8x32<Native>>);
+        sets!("cmp-or-64", CmpOr<u8x64<Native>>);
+        sets!("nibble-map-16", NibbleMap<u8x16<Native>>);
+        sets!("nibble-map-32", NibbleMap<u8x32<Native>>);
+        sets!("nibble-map-64", NibbleMap<u8x64<Native>>);
+        #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), target_feature = "avx2"))]
+        {
+            sets!("pcmpistr-16", Pcmpistr<u8x16<Native>>);
+            sets!("pcmpistr-32", Pcmpistr<u8x32<Native>>);
+            sets!("pcmpistr-64", Pcmpistr<u8x64<Native>>);
+            sets!("pcmpestr-16", Pcmpestr<u8x16<Native>>);
+            sets!("pcmpestr-32", Pcmpestr<u8x32<Native>>);
+            sets!("pcmpestr-64", Pcmpestr<u8x64<Native>>);
+        }
+        engines
+    }};
+}
+
 /// The engines for one DFA: every parser and `read_record` variant, compaction
-/// first so that it is the reference for the reference DFA.
+/// first so that it is the reference for the reference DFA. `$fields` is the
+/// initial size of the field buffers, `None` for the parsers' defaults.
 macro_rules! engines_for {
-    ($dfa:ty, $name:literal, $config:expr, $input:expr, $capacity:expr) => {{
-        let mut compaction =
-            CompactionParser::<_, $dfa>::with_capacity($input, $config.clone(), $capacity, compaction::DEFAULT_FIELDS);
-        let mut zerocopy =
-            ZeroCopyParser::<_, $dfa>::with_capacity($input, $config.clone(), $capacity, zerocopy::DEFAULT_FIELDS);
-        let mut branchless =
-            CompactionParser::<_, $dfa>::with_capacity($input, $config.clone(), $capacity, compaction::DEFAULT_FIELDS);
-        let mut simd_scalar =
-            CompactionParser::<_, $dfa>::with_capacity($input, $config.clone(), $capacity, compaction::DEFAULT_FIELDS);
-        let mut simd_cmp_or =
-            CompactionParser::<_, $dfa>::with_capacity($input, $config.clone(), $capacity, compaction::DEFAULT_FIELDS);
-        let mut simd_check_cmp_or =
-            CompactionParser::<_, $dfa>::with_capacity($input, $config.clone(), $capacity, compaction::DEFAULT_FIELDS);
-        let scalar_skip = ScalarSkip::new($config);
-        let mut simd_nibble_map =
-            CompactionParser::<_, $dfa>::with_capacity($input, $config.clone(), $capacity, compaction::DEFAULT_FIELDS);
-        let mut simd_check_nibble_map =
-            CompactionParser::<_, $dfa>::with_capacity($input, $config.clone(), $capacity, compaction::DEFAULT_FIELDS);
-        let cmp_or = CmpOr::<Native>::new($config);
-        let nibble_map = NibbleMap::<Native>::new($config);
-        [
+    ($dfa:ty, $name:literal, $config:expr, $input:expr, $capacity:expr, $fields:expr) => {{
+        let fields = $fields.unwrap_or(compaction::DEFAULT_FIELDS);
+        let mut compaction = CompactionParser::<_, $dfa>::with_capacity($input, $config.clone(), $capacity, fields);
+        let mut zerocopy = ZeroCopyParser::<_, $dfa>::with_capacity(
+            $input,
+            $config.clone(),
+            $capacity,
+            $fields.unwrap_or(zerocopy::DEFAULT_FIELDS),
+        );
+        let mut branchless = CompactionParser::<_, $dfa>::with_capacity($input, $config.clone(), $capacity, fields);
+        let mut engines = vec![
             (
                 concat!("compaction/", $name).to_string(),
                 Box::new(move || compaction.read_record().map(|r| r.map(|r| strings(r.iter()))))
@@ -120,47 +196,9 @@ macro_rules! engines_for {
                         .map(|r| r.map(|r| strings(r.iter())))
                 }),
             ),
-            (
-                concat!("compaction-simd-scalar/", $name).to_string(),
-                Box::new(move || {
-                    simd_scalar
-                        .read_record_simd(scalar_skip)
-                        .map(|r| r.map(|r| strings(r.iter())))
-                }),
-            ),
-            (
-                concat!("compaction-simd-cmp-or/", $name).to_string(),
-                Box::new(move || {
-                    simd_cmp_or
-                        .read_record_simd(cmp_or)
-                        .map(|r| r.map(|r| strings(r.iter())))
-                }),
-            ),
-            (
-                concat!("compaction-simd-check-cmp-or/", $name).to_string(),
-                Box::new(move || {
-                    simd_check_cmp_or
-                        .read_record_simd_check(cmp_or)
-                        .map(|r| r.map(|r| strings(r.iter())))
-                }),
-            ),
-            (
-                concat!("compaction-simd-nibble-map/", $name).to_string(),
-                Box::new(move || {
-                    simd_nibble_map
-                        .read_record_simd(nibble_map)
-                        .map(|r| r.map(|r| strings(r.iter())))
-                }),
-            ),
-            (
-                concat!("compaction-simd-check-nibble-map/", $name).to_string(),
-                Box::new(move || {
-                    simd_check_nibble_map
-                        .read_record_simd_check(nibble_map)
-                        .map(|r| r.map(|r| strings(r.iter())))
-                }),
-            ),
-        ]
+        ];
+        engines.extend(skipping_for!($dfa, $name, $config, $input, $capacity, fields));
+        engines
     }};
 }
 
@@ -168,12 +206,17 @@ macro_rules! engines_for {
 ///
 /// To bring a new [`Dfa`] into the suite, add one line to the array below; a
 /// new parser or `read_record` variant goes into [`engines_for`].
-fn engines<'a>(config: &Config, input: &'a [u8], capacity: usize) -> Vec<(String, Engine<'a>)> {
+fn engines<'a>(
+    config: &Config,
+    input: &'a [u8],
+    capacity: usize,
+    fields: Option<usize>,
+) -> Vec<(String, Engine<'a>)> {
     [
-        engines_for!(ReferenceDfa, "reference", config, input, capacity),
-        engines_for!(BitshiftDfa, "bitshift", config, input, capacity),
-        engines_for!(TableDfa, "table", config, input, capacity),
-        engines_for!(ClassDfa, "class", config, input, capacity),
+        engines_for!(ReferenceDfa, "reference", config, input, capacity, fields),
+        engines_for!(BitshiftDfa, "bitshift", config, input, capacity, fields),
+        engines_for!(TableDfa, "table", config, input, capacity, fields),
+        engines_for!(ClassDfa, "class", config, input, capacity, fields),
     ]
     .into_iter()
     .flatten()

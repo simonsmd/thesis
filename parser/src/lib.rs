@@ -6,6 +6,6 @@ pub mod reference;
 pub mod table;
 pub mod bitshift;
 pub mod class;
-pub mod skip;
+pub mod classifier;
 
 pub use buffer::DEFAULT_CAPACITY;

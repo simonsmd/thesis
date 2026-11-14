@@ -1,8 +1,10 @@
 //! Every parser the harness can run, under one name each.
 //!
 //! Names are `<record construction>/<read_record variant>/<skip>/<dfa>` for this crate's parsers,
-//! with `-` where an axis does not apply, e.g. `compaction/simd/nibble-map/table`. The rust-csv
-//! parsers are `csv-core/dfa` and `csv/byte-record`. Select them with globs.
+//! with `-` where an axis does not apply, e.g. `compaction/simd/nibble-map-32-state/table`. The
+//! skip is the classifier, its vector width and whether it looks for the structural bytes of each
+//! state or the shared ones. The rust-csv parsers are `csv-core/dfa` and `csv/byte-record`.
+//! Select them with globs.
 //!
 //! Each entry holds plain function pointers to fully monomorphized drivers, so dispatch costs one
 //! indirect call per parse and nothing per record.
@@ -13,11 +15,13 @@ use csv_parser::{
     bitshift::BitshiftDfa,
     class::ClassDfa,
     dfa::Dfa,
-    parser::{CompactionParser, Error, ZeroCopyParser, compaction, zerocopy},
+    parser::{CompactionParser, Error, PerState, Sets, Shared, ZeroCopyParser, compaction, zerocopy},
     reference::ReferenceDfa,
-    skip::{CmpOr, Native, NibbleMap, ScalarSkip, Skip},
+    classifier::{Classifier, CmpOr, Native, NibbleMap, u8x16, u8x32, u8x64},
     table::TableDfa,
 };
+#[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), target_feature = "avx2"))]
+use csv_parser::classifier::{Pcmpestr, Pcmpistr};
 use serde::Serialize;
 
 use crate::{check::Digest, dialect::Dialect, rust_csv};
@@ -53,9 +57,13 @@ impl Consumer for Statistics {
     fn record<'a>(&mut self, fields: impl ExactSizeIterator<Item = &'a [u8]>) {
         self.records += 1;
         self.fields += fields.len() as u64;
+        // A local per record: the statistics are live across the whole parse loop, and a spilled
+        // accumulator would put a store-forward on the chain of every field
+        let mut bytes = 0;
         for field in fields {
-            self.field_bytes += field.len() as u64;
+            bytes += field.len() as u64;
         }
+        self.field_bytes += bytes;
     }
 }
 
@@ -243,12 +251,17 @@ variant!(CompactionPlain, compaction_plain, compaction_plain_records, Compaction
     <D: Dfa>, p, let _s: () = (); p.read_record());
 variant!(CompactionBranchless, compaction_branchless, compaction_branchless_records, CompactionParser,
     compaction, <D: Dfa>, p, let _s: () = (); p.read_record_branchless());
-variant!(CompactionSimd, compaction_simd, compaction_simd_records, CompactionParser, compaction,
-    <D: Dfa, S: Skip>, p, let skip: S = S::new(p.config()); p.read_record_simd(skip));
 variant!(CompactionSimdCheck, compaction_simd_check, compaction_simd_check_records, CompactionParser,
-    compaction, <D: Dfa, S: Skip>, p, let skip: S = S::new(p.config()); p.read_record_simd_check(skip));
+    compaction, <D: Dfa, S: Classifier, M: Sets>, p, let s: (S, M) = (S::new(p.config()), M::default());
+    p.read_record_simd_check(&s.0, s.1));
+variant!(CompactionSimd, compaction_simd, compaction_simd_records, CompactionParser, compaction,
+    <D: Dfa, S: Classifier, M: Sets>, p, let s: (S, M) = (S::new(p.config()), M::default());
+    p.read_record_simd(&s.0, s.1));
 variant!(ZeroCopyPlain, zerocopy_plain, zerocopy_plain_records, ZeroCopyParser, zerocopy,
     <D: Dfa>, p, let _s: () = (); p.read_record());
+variant!(ZeroCopySimd, zerocopy_simd, zerocopy_simd_records, ZeroCopyParser, zerocopy,
+    <D: Dfa, S: Classifier, M: Sets>, p, let s: (S, M) = (S::new(p.config()), M::default());
+    p.read_record_simd(&s.0, s.1));
 
 /// One registry entry from a variant instantiated for the given type arguments.
 macro_rules! entry {
@@ -262,6 +275,43 @@ macro_rules! entry {
     };
 }
 
+/// The entries of a skipping `read_record` variant for one classifier, with either set:
+/// `<skip>-shared` and `<skip>-state`.
+macro_rules! sets {
+    ($variant:literal, $prepare:ident, $pull:ident, $dfa:ty, $name:literal, $skip:literal, $classifier:ty) => {
+        [
+            entry!(concat!($variant, "/", $skip, "-shared/", $name), $prepare, $pull,
+                <$dfa, $classifier, Shared>),
+            entry!(concat!($variant, "/", $skip, "-state/", $name), $prepare, $pull,
+                <$dfa, $classifier, PerState>),
+        ]
+    };
+}
+
+/// The entries of a skipping `read_record` variant for every classifier and vector width.
+macro_rules! classifiers {
+    ($variant:literal, $prepare:ident, $pull:ident, $dfa:ty, $name:literal) => {{
+        let mut entries = Vec::new();
+        entries.extend(sets!($variant, $prepare, $pull, $dfa, $name, "cmp-or-16", CmpOr<u8x16<Native>>));
+        entries.extend(sets!($variant, $prepare, $pull, $dfa, $name, "cmp-or-32", CmpOr<u8x32<Native>>));
+        entries.extend(sets!($variant, $prepare, $pull, $dfa, $name, "cmp-or-64", CmpOr<u8x64<Native>>));
+        entries.extend(sets!($variant, $prepare, $pull, $dfa, $name, "nibble-map-16", NibbleMap<u8x16<Native>>));
+        entries.extend(sets!($variant, $prepare, $pull, $dfa, $name, "nibble-map-32", NibbleMap<u8x32<Native>>));
+        entries.extend(sets!($variant, $prepare, $pull, $dfa, $name, "nibble-map-64", NibbleMap<u8x64<Native>>));
+        // SSE 4.2, which every AVX2 cpu has
+        #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), target_feature = "avx2"))]
+        {
+            entries.extend(sets!($variant, $prepare, $pull, $dfa, $name, "pcmpistr-16", Pcmpistr<u8x16<Native>>));
+            entries.extend(sets!($variant, $prepare, $pull, $dfa, $name, "pcmpistr-32", Pcmpistr<u8x32<Native>>));
+            entries.extend(sets!($variant, $prepare, $pull, $dfa, $name, "pcmpistr-64", Pcmpistr<u8x64<Native>>));
+            entries.extend(sets!($variant, $prepare, $pull, $dfa, $name, "pcmpestr-16", Pcmpestr<u8x16<Native>>));
+            entries.extend(sets!($variant, $prepare, $pull, $dfa, $name, "pcmpestr-32", Pcmpestr<u8x32<Native>>));
+            entries.extend(sets!($variant, $prepare, $pull, $dfa, $name, "pcmpestr-64", Pcmpestr<u8x64<Native>>));
+        }
+        entries
+    }};
+}
+
 /// Every parser and `read_record` variant for one DFA.
 macro_rules! for_dfa {
     ($dfa:ty, $name:literal) => {
@@ -269,20 +319,15 @@ macro_rules! for_dfa {
             entry!(concat!("compaction/plain/-/", $name), compaction_plain, compaction_plain_records, <$dfa>),
             entry!(concat!("compaction/branchless/-/", $name), compaction_branchless,
                 compaction_branchless_records, <$dfa>),
-            entry!(concat!("compaction/simd/scalar/", $name), compaction_simd, compaction_simd_records,
-                <$dfa, ScalarSkip>),
-            entry!(concat!("compaction/simd/cmp-or/", $name), compaction_simd, compaction_simd_records,
-                <$dfa, CmpOr<Native>>),
-            entry!(concat!("compaction/simd/nibble-map/", $name), compaction_simd, compaction_simd_records,
-                <$dfa, NibbleMap<Native>>),
-            entry!(concat!("compaction/simd-check/scalar/", $name), compaction_simd_check,
-                compaction_simd_check_records, <$dfa, ScalarSkip>),
-            entry!(concat!("compaction/simd-check/cmp-or/", $name), compaction_simd_check,
-                compaction_simd_check_records, <$dfa, CmpOr<Native>>),
-            entry!(concat!("compaction/simd-check/nibble-map/", $name), compaction_simd_check,
-                compaction_simd_check_records, <$dfa, NibbleMap<Native>>),
-            entry!(concat!("zerocopy/plain/-/", $name), zerocopy_plain, zerocopy_plain_records, <$dfa>),
         ]
+        .into_iter()
+        .chain(classifiers!("compaction/simd", compaction_simd, compaction_simd_records, $dfa, $name))
+        .chain(classifiers!("compaction/simd-check", compaction_simd_check, compaction_simd_check_records, $dfa, $name))
+        .chain(classifiers!("zerocopy/simd", zerocopy_simd, zerocopy_simd_records, $dfa, $name))
+        .chain([
+            entry!(concat!("zerocopy/plain/-/", $name), zerocopy_plain, zerocopy_plain_records, <$dfa>),
+        ])
+        .collect::<Vec<_>>()
     };
 }
 

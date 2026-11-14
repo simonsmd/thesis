@@ -1,16 +1,18 @@
 use std::{io::Read, str::Utf8Error};
 
-use super::{Error, Exit, Position};
+use fearless_simd::{SimdBase, SimdMask};
+
+use super::{Error, Exit, Position, Sets};
 use crate::{
     buffer::{Buffer, DEFAULT_CAPACITY, Refill},
+    classifier::{self, Classifier},
     config::{Config, QuoteStyle},
     dfa::Dfa,
-    skip::{BLOCK, Skip},
 };
 
 /// Initial size of the field end buffer: `read_record_branchless` writes a field end for every
 /// buffered byte, so it needs one entry per byte of a default size buffer.
-pub const DEFAULT_FIELDS: usize = DEFAULT_CAPACITY + 1024;
+pub const DEFAULT_FIELDS: usize = DEFAULT_CAPACITY;
 
 #[derive(Debug)]
 pub struct CompactionParser<R: Read, D: Dfa> {
@@ -24,6 +26,33 @@ pub struct CompactionParser<R: Read, D: Dfa> {
     /// store if this parser encountered an error so read_record does not start parsing from an
     /// invalid state
     error: bool,
+    /// The masks of the last block `read_record_simd` classified, so a record starting in
+    /// the same block does not classify it again
+    structural_block: StructuralBlock,
+    /// [`classifier::ordinary_byte`] of the config
+    ordinary: u8,
+}
+
+/// The structural masks of the vector at `base`, valid while the buffer has read
+/// `bytes_read` bytes.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct StructuralBlock {
+    pub(super) bytes_read: usize,
+    pub(super) base: usize,
+    /// With [`Shared`](super::Shared) all structural bytes, with [`PerState`](super::PerState)
+    /// those of an unquoted field.
+    pub(super) in_field: u64,
+    /// Those of a quoted field, only set and read with [`PerState`](super::PerState).
+    pub(super) in_quoted_field: u64,
+}
+
+impl StructuralBlock {
+    pub(super) const NONE: Self = Self {
+        bytes_read: usize::MAX,
+        base: usize::MAX,
+        in_field: 0,
+        in_quoted_field: 0,
+    };
 }
 
 impl<R: Read, D: Dfa> CompactionParser<R, D> {
@@ -40,6 +69,7 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
     /// either exercise the growth paths in tests.
     pub fn with_capacity(reader: R, config: Config, capacity: usize, fields: usize) -> Self {
         let dfa = D::new(&config);
+        let ordinary = classifier::ordinary_byte(&config);
         Self {
             config,
             dfa,
@@ -49,6 +79,8 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
             field_ends: vec![0; fields.max(1)],
             position: Position::default(),
             error: false,
+            structural_block: StructuralBlock::NONE,
+            ordinary,
         }
     }
 
@@ -59,6 +91,7 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
         self.read_index = 0;
         self.position = Position::default();
         self.error = false;
+        self.structural_block = StructuralBlock::NONE;
     }
 
     pub fn position(&self) -> Position {
@@ -74,13 +107,12 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
     }
 }
 
-/// Minimum gap between write and read index at the start of a record and after a refill. 4 bytes
-/// were enough on Alder Lake but leave some extra space for other cpus (only costs a few extra
-/// refills)
-const MIN_GAP: usize = 64;
-
-// read_record_simd copies whole blocks to the write index, which must not reach the unread input
-const _: () = assert!(MIN_GAP >= BLOCK);
+/// Minimum gap between write and read index at the start of a record and after a refill. This was
+/// originally introduced to avoid unnecessary memory ordering machine clears for the standard
+/// read_record. read_record_simd always copies whole classifier vectors (up to 64 bytes) so it
+/// needs at least that gap to not overwrite unread input. read_record_simd_check writes up to 64 byte blocks
+/// so use a gap of 128 to be safe for memory ordering machine clears in that instance.
+const MIN_GAP: usize = 128;
 
 impl<R: Read, D: Dfa> CompactionParser<R, D> {
     #[inline]
@@ -134,8 +166,12 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
             // keep variables used in the hotloop in registers
             let dfa = &self.dfa;
             let buffer = self.buffer.data_mut();
-            let field_ends = self.field_ends.as_mut_slice();
             let mut read = self.read_index;
+            // A cursor and an end instead of the slice, its length and the count: one register
+            // less in the core loop and no bounds check before the write
+            let fields = self.field_ends.as_mut_ptr_range();
+            // SAFETY: field_count < field_ends.len() at every entry of the core loop
+            let mut field_end = unsafe { fields.start.add(field_count) };
 
             let exit = loop {
                 if read >= buffer.len() {
@@ -159,20 +195,25 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
                         break Exit::Error;
                     }
 
-                    field_ends[field_count] = write - record_start;
-                    field_count += 1;
+                    // SAFETY: field_end < fields.end, checked after every write
+                    unsafe {
+                        field_end.write(write - record_start);
+                        field_end = field_end.add(1);
+                    }
 
                     if dfa.is_record_end(state) {
                         break Exit::EndRecord;
                     }
 
-                    if field_count == field_ends.len() {
+                    if field_end == fields.end {
                         break Exit::FieldEndsFull;
                     }
                 }
             };
 
             self.read_index = read;
+            // SAFETY: field_end is in the same allocation as fields.start and not before it
+            field_count = unsafe { field_end.offset_from(fields.start) } as usize;
 
             match exit {
                 Exit::Refill => {}
@@ -201,6 +242,8 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
         }))
     }
 
+    /// Parse a record like [`read_record`](Self::read_record) but without branching for every
+    /// field.
     #[inline]
     pub fn read_record_branchless(&mut self) -> Result<Option<Record<'_>>, Error> {
         if self.error {
@@ -238,7 +281,7 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
                 // resize field_ends if there is not enough space for the maximum possible amount
                 // of fields (one per input byte)
                 if self.field_ends.len() - field_count < self.buffer.len() {
-                    self.field_ends.resize(self.buffer.capacity() + 1024, 0);
+                    self.field_ends.resize(self.buffer.capacity(), 0);
                 }
 
                 if read == 0 {
@@ -332,162 +375,13 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
         }))
     }
 
-    /// [`read_record`](Self::read_record) that skips the content of fields using `skip`.
-    ///
-    /// `skip` is taken by value so it lives in locals and its constants can stay in registers.
-    /// Build it once with [`Skip::new`] from [`config`](Self::config) and pass it to every call.
+    /// Parse a record like [`read_record`](Self::read_record) but skip chunks of input without any
+    /// structural bytes using the classifier.
     #[inline]
-    pub fn read_record_simd<S: Skip>(&mut self, skip: S) -> Result<Option<Record<'_>>, Error> {
-        if self.error {
-            return Err(Error::Parser(self.position));
-        }
-
-        // Start the compacted record with a gap to the read index: if write trails read by only a
-        // few bytes the cpu falsely detects a conflict between the store (whose address is known
-        // late) and the loads of the next bytes, and flushes the pipeline or stops loading ahead
-        let mut record_start = self.read_index.saturating_sub(MIN_GAP);
-        let mut write = record_start;
-        let mut field_count = 0;
-
-        // A record always starts in the StartRecord (equivalent to EndRecord) state so there is no
-        // need to store the DFA state between records
-        let mut state = self.dfa.start_state();
-
-        let is_error = loop {
-            if self.read_index == self.buffer.len() {
-                // read the new input MIN_GAP bytes after the write index, so the gap does not
-                // drop below MIN_GAP for the rest of the record
-                // TODO: make continuing after IO errors safe
-                let Refill { shift, read } = self
-                    .buffer
-                    .fill(&mut self.reader, record_start, write, MIN_GAP)
-                    .map_err(Error::IO)?;
-                record_start -= shift;
-                write -= shift;
-                self.read_index = write + MIN_GAP;
-
-                if read == 0 {
-                    if (self.dfa.in_quoted_field(state)
-                        && matches!(self.config.quote_style, QuoteStyle::Strict(_)))
-                        || self.dfa.in_escape_sequence(state)
-                    {
-                        break true;
-                    }
-
-                    if write == record_start && field_count == 0 {
-                        return Ok(None);
-                    }
-
-                    self.field_ends[field_count] = write - record_start;
-                    field_count += 1;
-                    break false;
-                }
-            }
-
-            // keep variables used in the hotloop in registers
-            let dfa = &self.dfa;
-            let buffer = self.buffer.data_mut();
-            let field_ends = self.field_ends.as_mut_slice();
-            let mut read = self.read_index;
-
-            // TODO: LLVM keeps the constants of `skip` on the stack and reloads them at every
-            // skip (5 loads for CmpOr on AVX2), probably because they live across the calls of the
-            // refill path and all vector registers are caller saved. Passing `skip` through
-            // black_box here does not change that.
-            let exit = loop {
-                // In an output state every byte up to the next structural byte is output and keeps
-                // the state (see crate::skip), so copy them as a whole block and continue at the
-                // structural byte. The last BLOCK - 1 bytes of the buffer go through the DFA.
-                if dfa.is_output(state)
-                    && let Some(block) = buffer.get(read..read + BLOCK)
-                {
-                    debug_assert!(write + BLOCK <= read);
-                    let block: [u8; BLOCK] = block.try_into().unwrap();
-                    let skipped = (skip.structural_mask(&block) as u32).trailing_zeros() as usize;
-
-                    // The bytes after the skipped ones are written again by the DFA path, and
-                    // MIN_GAP >= BLOCK keeps the block behind the unread input
-                    buffer[write..write + BLOCK].copy_from_slice(&block);
-                    read += skipped;
-                    write += skipped;
-                }
-
-                if read >= buffer.len() {
-                    break Exit::Refill;
-                }
-
-                let byte = buffer[read];
-                state = dfa.transition(state, byte);
-
-                // SAFETY: write <= read < buffer.len()
-                unsafe {
-                    *buffer.get_unchecked_mut(write) = byte;
-                }
-                write += dfa.is_output(state) as usize;
-                read += 1;
-
-                if dfa.is_field_end(state) {
-                    if dfa.is_error(state) {
-                        // report the byte where the error occured which was not consumed
-                        read -= 1;
-                        break Exit::Error;
-                    }
-
-                    field_ends[field_count] = write - record_start;
-                    field_count += 1;
-
-                    if dfa.is_record_end(state) {
-                        break Exit::EndRecord;
-                    }
-
-                    if field_count == field_ends.len() {
-                        break Exit::FieldEndsFull;
-                    }
-                }
-            };
-
-            self.read_index = read;
-
-            match exit {
-                Exit::Refill => {}
-                Exit::FieldEndsFull => {
-                    let len = self.field_ends.len() * 2;
-                    self.field_ends.resize(len, 0);
-                }
-                Exit::EndRecord => break false,
-                Exit::Error => break true,
-            }
-        };
-
-        self.position.byte = self.buffer.source_offset(self.read_index);
-
-        if is_error {
-            self.error = true;
-            self.position.field = field_count;
-            return Err(Error::Parser(self.position));
-        }
-
-        self.position.record += 1;
-
-        Ok(Some(Record {
-            buffer: &self.buffer.data()[record_start..write],
-            field_ends: &self.field_ends[..field_count],
-        }))
-    }
-
-    /// [`read_record_simd`](Self::read_record_simd) that only skips whole blocks without
-    /// structural bytes, and otherwise runs the DFA over the next block.
-    ///
-    /// The read index only ever advances by `BLOCK` or by one byte, never by a distance computed
-    /// from the mask, so the mask is not on the dependency chain of the next load: the branch
-    /// on it is predicted and the DFA runs ahead while the check is still being computed.
-    ///
-    /// `skip` is taken by value so it lives in locals and its constants can stay in registers.
-    /// Build it once with [`Skip::new`] from [`config`](Self::config) and pass it to every call.
-    #[inline]
-    pub fn read_record_simd_check<S: Skip>(
+    pub fn read_record_simd_check<C: Classifier, M: Sets>(
         &mut self,
-        skip: S,
+        classifier: &C,
+        _sets: M,
     ) -> Result<Option<Record<'_>>, Error> {
         if self.error {
             return Err(Error::Parser(self.position));
@@ -538,33 +432,49 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
             // keep variables used in the hotloop in registers
             let dfa = &self.dfa;
             let buffer = self.buffer.data_mut();
-            let field_ends = self.field_ends.as_mut_slice();
             let mut read = self.read_index;
+            // Use a start and end pointer instaed of a slice with a count which saves one
+            // register (the slice length is not needed).
+            let fields = self.field_ends.as_mut_ptr_range();
+            // SAFETY: field_count < field_ends.len() at every entry of the core loop
+            let mut field_end = unsafe { fields.start.add(field_count) };
 
             let exit = 'core: loop {
                 if read >= buffer.len() {
                     break Exit::Refill;
                 }
 
-                // In an output state a block without structural bytes is all output and keeps
-                // the state (see crate::skip), so copy it as a whole
+                // In an output state, identify input chunks that do not contain any structural
+                // bytes using the classifier since the DFA stays in the same state and all bytes
+                // are copied to the output.
                 if dfa.is_output(state)
-                    && let Some(block) = buffer.get(read..read + BLOCK)
+                    && let Some(bytes) = buffer.get(read..read + C::LEN)
                 {
-                    debug_assert!(write + BLOCK <= read);
-                    let block: [u8; BLOCK] = block.try_into().unwrap();
-                    if skip.structural_mask(&block) == 0 {
-                        // MIN_GAP >= BLOCK keeps the block behind the unread input
-                        buffer[write..write + BLOCK].copy_from_slice(&block);
-                        read += BLOCK;
-                        write += BLOCK;
+                    let v = C::load(bytes);
+                    let structural = if M::PER_STATE {
+                        // Only run the DFA if the input contains a byte that can change the state
+                        // in the current state (either quoted or normal field).
+                        if dfa.in_quoted_field(state) {
+                            classifier.in_quoted_field(v).any_true()
+                        } else {
+                            classifier.in_field(v).any_true()
+                        }
+                    } else {
+                        // use the same set of structural bytes for quoted and unquoted fields.
+                        // Results in more false positives.
+                        classifier.structural(v).any_true()
+                    };
+                    if !structural {
+                        v.store_slice(&mut buffer[write..write + C::LEN]);
+                        read += C::LEN;
+                        write += C::LEN;
                         continue;
                     }
                 }
 
-                // Otherwise run the DFA over the next block before checking again, a check per
-                // byte would cost more than the DFA step
-                let end = (read + BLOCK).min(buffer.len());
+                // Otherwise run the DFA over the whole chunk before checking again for the next
+                // chunk
+                let end = (read + C::LEN).min(buffer.len());
                 while read < end {
                     let byte = buffer[read];
                     state = dfa.transition(state, byte);
@@ -583,14 +493,17 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
                             break 'core Exit::Error;
                         }
 
-                        field_ends[field_count] = write - record_start;
-                        field_count += 1;
+                        // SAFETY: field_end < fields.end, checked after every write
+                        unsafe {
+                            field_end.write(write - record_start);
+                            field_end = field_end.add(1);
+                        }
 
                         if dfa.is_record_end(state) {
                             break 'core Exit::EndRecord;
                         }
 
-                        if field_count == field_ends.len() {
+                        if field_end == fields.end {
                             break 'core Exit::FieldEndsFull;
                         }
                     }
@@ -598,6 +511,8 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
             };
 
             self.read_index = read;
+            // SAFETY: field_end is in the same allocation as fields.start and not before it
+            field_count = unsafe { field_end.offset_from(fields.start) } as usize;
 
             match exit {
                 Exit::Refill => {}
@@ -625,6 +540,278 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
             field_ends: &self.field_ends[..field_count],
         }))
     }
+
+    /// Parse a record like [`read_record`](Self::read_record) but skip to the next structural byte
+    /// within fields using the classifier instead of running the DFA for every byte.
+    ///
+    /// The input is classified in aligned blocks of one vector of `C` (`C::LEN` bytes) into one mask
+    /// per output state.
+    /// In an output state the parser copies everything up to the next set bit of the mask for the
+    /// current state and continues there, otherwise it runs the DFA on the next byte (the byte
+    /// after a delimiter, a closing quote, an escape or a comment line).
+    ///
+    /// The next load address does not depend on a mask: blocks follow each other at a fixed
+    /// stride, and the jump to the next structural byte is a shift and a `tzcnt` of a mask that is
+    /// already computed. A block is classified once, however many fields it holds.
+    #[inline]
+    pub fn read_record_simd<C: Classifier, M: Sets>(
+        &mut self,
+        classifier: &C,
+        _sets: M,
+    ) -> Result<Option<Record<'_>>, Error> {
+        const {
+            // the block bitmasks are u64, and `read & !(C::LEN - 1)` aligns the blocks
+            assert!(C::LEN <= 64 && C::LEN.is_power_of_two());
+            // copy_block needs write + C::LEN <= read, which the gap at a record start guarantees
+            assert!(MIN_GAP >= C::LEN);
+        };
+
+        if self.error {
+            return Err(Error::Parser(self.position));
+        }
+
+        // Start the compacted record with a gap to the read index: if write trails read by only a
+        // few bytes the cpu falsely detects a conflict between the store (whose address is known
+        // late) and the loads of the next bytes, and flushes the pipeline or stops loading ahead
+        let mut record_start = self.read_index.saturating_sub(MIN_GAP);
+        let mut write = record_start;
+        let mut field_count = 0;
+
+        // A record always starts in the StartRecord (equivalent to EndRecord) state so there is no
+        // need to store the DFA state between records
+        let mut state = self.dfa.start_state();
+
+        let is_error = loop {
+            if self.read_index == self.buffer.len() {
+                // read the new input MIN_GAP bytes after the write index, so the gap does not
+                // drop below MIN_GAP for the rest of the record
+                // TODO: make continuing after IO errors safe
+                let Refill { shift, read } = self
+                    .buffer
+                    .fill(&mut self.reader, record_start, write, MIN_GAP)
+                    .map_err(Error::IO)?;
+                record_start -= shift;
+                write -= shift;
+                self.read_index = write + MIN_GAP;
+
+                if read == 0 {
+                    if (self.dfa.in_quoted_field(state)
+                        && matches!(self.config.quote_style, QuoteStyle::Strict(_)))
+                        || self.dfa.in_escape_sequence(state)
+                    {
+                        break true;
+                    }
+
+                    if write == record_start && field_count == 0 {
+                        return Ok(None);
+                    }
+
+                    self.field_ends[field_count] = write - record_start;
+                    field_count += 1;
+                    break false;
+                }
+            }
+
+            let bytes_read = self.buffer.bytes_read();
+            let mut block = self.structural_block;
+            if block.bytes_read != bytes_read {
+                block = StructuralBlock {
+                    bytes_read,
+                    ..StructuralBlock::NONE
+                };
+            }
+
+            // keep variables used in the hotloop in registers
+            let dfa = &self.dfa;
+            let ordinary = self.ordinary;
+            let buffer = self.buffer.data_mut();
+            let mut read = self.read_index;
+            // Use a start and end pointer instaed of a slice with a count which saves one
+            // register (the slice length is not needed).
+            let fields = self.field_ends.as_mut_ptr_range();
+            // SAFETY: field_count < field_ends.len() at every entry of the core loop
+            let mut field_end = unsafe { fields.start.add(field_count) };
+
+            macro_rules! step {
+                ($core:lifetime) => {
+                    step!($core, {})
+                };
+                // `$field_start` runs after a field end inside the record
+                ($core:lifetime, $field_start:block) => {
+                    // SAFETY: every use is guarded by read < end <= buffer.len()
+                    let byte = unsafe { *buffer.get_unchecked(read) };
+                    state = dfa.transition(state, byte);
+
+                    // SAFETY: write <= read < buffer.len()
+                    unsafe {
+                        *buffer.get_unchecked_mut(write) = byte;
+                    }
+                    write += dfa.is_output(state) as usize;
+                    read += 1;
+
+                    if dfa.is_field_end(state) {
+                        if dfa.is_error(state) {
+                            // report the byte where the error occured which was not consumed
+                            read -= 1;
+                            break $core Exit::Error;
+                        }
+
+                        // SAFETY: field_end < fields.end, checked after every write
+                        unsafe {
+                            field_end.write(write - record_start);
+                            field_end = field_end.add(1);
+                        }
+
+                        if dfa.is_record_end(state) {
+                            break $core Exit::EndRecord;
+                        }
+
+                        if field_end == fields.end {
+                            break $core Exit::FieldEndsFull;
+                        }
+
+                        $field_start
+                    }
+                };
+            }
+
+            // The block of the read index. Advanced by a constant stride and not computed from
+            // read, so the next block can be loaded and classified before the skips and DFA steps
+            // of the current one are done.
+            let mut base = read & !(C::LEN - 1);
+
+            let exit = 'core: loop {
+                // Two times the classifier chunk length needs to be left in the buffer since the
+                // classifier reads one chunk and since always a full block is copied it might read
+                // up to one additional chunk when copying at the end of a block
+                if base + 2 * C::LEN > buffer.len() {
+                    while read < buffer.len() {
+                        step!('core);
+                    }
+                    break Exit::Refill;
+                }
+
+                if base != block.base {
+                    let v = C::load(&buffer[base..base + C::LEN]);
+                    block.base = base;
+                    if M::PER_STATE {
+                        let [in_field, in_quoted_field] = classifier.per_state(v);
+                        block.in_field = in_field.to_bitmask();
+                        block.in_quoted_field = in_quoted_field.to_bitmask();
+                    } else {
+                        block.in_field = classifier.structural(v).to_bitmask();
+                    }
+                }
+
+                let end = base + C::LEN;
+
+                while read < end {
+                    // Skip to the next structural byte in an output state
+                    if dfa.is_output(state) {
+                        let mask = if M::PER_STATE && dfa.in_quoted_field(state) {
+                            // hint to LLVM to not turn this into a cmov which would make the mask
+                            // and thus the read index depend on the DFA state transition so the
+                            // transition and skip to the next structural byte can not run in
+                            // parallel
+                            std::hint::cold_path();
+                            block.in_quoted_field
+                        } else {
+                            block.in_field
+                        };
+                        let rest = mask >> (read - base);
+
+                        // skip the rest of the chunk if it does not contain any structural bytes.
+                        // The code is duplicated so that LLVM does not use a cmov to calculate the
+                        // number of skipped bytes which would introduce additional latency since
+                        // this calculation depends on the read index.
+                        if rest == 0 {
+                            let skipped = end - read;
+                            // SAFETY: read < end and end + C::LEN <= buffer.len()
+                            unsafe { copy_block::<C>(buffer, read, write) };
+                            read = end;
+                            write += skipped;
+                            break;
+                        }
+
+                        let skipped = rest.trailing_zeros() as usize;
+                        // always copy a whole block which is faster than copying the exact number
+                        // of bytes that are skipped. The additional data is overwritten or ignored
+                        // anyways.
+                        // SAFETY: read < end and end + C::LEN <= buffer.len()
+                        unsafe { copy_block::<C>(buffer, read, write) };
+                        read += skipped;
+                        write += skipped;
+                    }
+
+                    // As a small optimization the DFA step for going from the EndField to the
+                    // InField state when a field end is followed immediatly by an unquoted field
+                    // can be skipped because there are no quotes or other structural bytes to
+                    // remove so the copy can be handled by the skip loop.
+                    step!('core, {
+                        let structural = if M::PER_STATE {
+                            block.in_field | block.in_quoted_field
+                        } else {
+                            block.in_field
+                        };
+                        if read < end && (structural >> (read - base)) & 1 == 0 {
+                            state = dfa.transition(state, ordinary);
+                            debug_assert!(dfa.is_output(state) && !dfa.in_quoted_field(state));
+                        }
+                    });
+                }
+
+                // a skip ends at the end of the block and a DFA step advances by one byte, so the
+                // loop leaves the block exactly at its end
+                debug_assert_eq!(read, end);
+                base = end;
+            };
+
+            self.read_index = read;
+            self.structural_block = block;
+            // SAFETY: field_end is in the same allocation as fields.start and not before it
+            field_count = unsafe { field_end.offset_from(fields.start) } as usize;
+
+            match exit {
+                Exit::Refill => {}
+                Exit::FieldEndsFull => {
+                    let len = self.field_ends.len() * 2;
+                    self.field_ends.resize(len, 0);
+                }
+                Exit::EndRecord => break false,
+                Exit::Error => break true,
+            }
+        };
+
+        self.position.byte = self.buffer.source_offset(self.read_index);
+
+        if is_error {
+            self.error = true;
+            self.position.field = field_count;
+            return Err(Error::Parser(self.position));
+        }
+
+        self.position.record += 1;
+
+        Ok(Some(Record {
+            buffer: &self.buffer.data()[record_start..write],
+            field_ends: &self.field_ends[..field_count],
+        }))
+    }
+}
+
+/// Copy the [`C::LEN`](Classifier::LEN) bytes at `read` to `write`.
+///
+/// # Safety
+///
+/// `read + C::LEN` must not exceed `buffer.len()`, and `write + C::LEN <= read`.
+#[inline(always)]
+unsafe fn copy_block<C: Classifier>(buffer: &mut [u8], read: usize, write: usize) {
+    debug_assert!(write + C::LEN <= read);
+    debug_assert!(read + C::LEN <= buffer.len());
+    let data = buffer.as_mut_ptr();
+    // SAFETY: in bounds by the contract, and the ranges do not overlap since
+    // write + C::LEN <= read
+    unsafe { std::ptr::copy_nonoverlapping(data.add(read), data.add(write), C::LEN) };
 }
 
 #[derive(Debug, Clone, Copy)]

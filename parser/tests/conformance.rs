@@ -63,14 +63,16 @@ fn whitespace_is_significant() {
 fn refills_in_the_middle_of_a_record() {
     // Every buffer size must give the same records: a record that does not
     // fit grows the buffer instead of being cut in two.
-    let input = b"a,b,c\n\"quoted, with a delimiter\",\"esc\\\"aped\",x\n#comment\nlast,record\n";
+    let input = b"a,b,c\n\"quoted, with a delimiter\",\"esc\\\"aped\",x\n#comment\nlast,record\n\
+        x,\"a\"\"doubled quote early in a long field\"\n";
     let expected = rows(&[
         &["a", "b", "c"],
         &["quoted, with a delimiter", "esc\"aped", "x"],
         &["last", "record"],
+        &["x", "a\"doubled quote early in a long field"],
     ]);
 
-    for capacity in [1, 2, 3, 5, 8, 16, 64, 4096] {
+    for capacity in (1..=24).chain([64, 4096]) {
         let parsed = parse_with_capacity(&Config::new(), input, capacity).unwrap();
         assert_eq!(parsed, expected, "with a {capacity} byte buffer");
     }
@@ -102,6 +104,58 @@ fn fields_around_the_skip_block_size() {
         for capacity in [1, 7, 64, 65, 300, 4096] {
             let parsed = parse_with_capacity(&Config::new(), input.as_bytes(), capacity).unwrap();
             assert_eq!(parsed, expected, "{len} byte fields with a {capacity} byte buffer");
+        }
+    }
+}
+
+#[test]
+fn zero_bytes_before_structural_bytes() {
+    // the implicit length string instructions (Pcmpistr) stop at a zero byte, so put zero bytes
+    // at every distance before field ends, quotes and terminators in the same 16 bytes
+    for gap in 0..20 {
+        let x = "x".repeat(gap);
+        let plain = format!("\0{x}");
+        let quoted = format!("\0{x},\0{x}\"\"\0");
+        let input = format!("{plain},\"{quoted}\",{plain}\n\0\n").repeat(4);
+
+        let quoted = format!("\0{x},\0{x}\"\0");
+        let record: &[&str] = &[&plain, &quoted, &plain];
+        let expected = rows(&[record, &["\0"]].repeat(4));
+
+        for capacity in [1, 16, 64, 4096] {
+            let parsed = parse_with_capacity(&Config::new(), input.as_bytes(), capacity).unwrap();
+            assert_eq!(parsed, expected, "{gap} bytes after a zero byte with a {capacity} byte buffer");
+        }
+    }
+}
+
+#[test]
+fn zero_byte_delimiter() {
+    let config = Config::new().delimiter(0);
+    let field = "f".repeat(20);
+    let input = format!("a\0{field}\0\"q\0\"\n\0b\n");
+    assert_eq!(parse(&config, input.as_bytes()), rows(&[&["a", &field, "q\0"], &["", "b"]]));
+}
+
+#[test]
+fn long_fields_after_an_escape() {
+    // read_record_simd_* compact a field after a byte discarded inside it, in blocks: put the
+    // escape early, long runs after it that span blocks, several such fields per record and
+    // records that span a refill
+    for len in [1, 31, 32, 33, 63, 64, 65, 100, 200] {
+        let (x, y) = ("x".repeat(len), "y".repeat(len));
+        let doubled = format!("\"a\"\"{x}\"\"{y}\"");
+        let escaped = format!("b\\,{x}\\,{y}");
+        let input = format!("{doubled},{x},{escaped},z\n").repeat(6);
+
+        let doubled = format!("a\"{x}\"{y}");
+        let escaped = format!("b,{x},{y}");
+        let record: &[&str] = &[&doubled, &x, &escaped, "z"];
+        let expected = rows(&[record; 6]);
+
+        for capacity in [1, 100, 128, 200, 300, 1000, 4096] {
+            let parsed = parse_with_capacity(&Config::new(), input.as_bytes(), capacity).unwrap();
+            assert_eq!(parsed, expected, "{len} byte runs with a {capacity} byte buffer");
         }
     }
 }
@@ -303,6 +357,16 @@ fn escaped_delimiter_unquoted() {
 }
 
 #[test]
+fn escapes_in_the_last_field_at_eof() {
+    // The last field ends at the end of the input instead of an end byte.
+    let config = Config::new();
+    assert_eq!(parse(&config, b"a,\"b\""), rows(&[&["a", "b"]]));
+    assert_eq!(parse(&config, b"a,\"b\"\"c\""), rows(&[&["a", "b\"c"]]));
+    assert_eq!(parse(&config, b"a,b\\,c"), rows(&[&["a", "b,c"]]));
+    assert_eq!(parse(&config, b"a,\"b\"c"), rows(&[&["a", "bc"]]));
+}
+
+#[test]
 fn escaped_quote_in_quoted_field() {
     let config = Config::new();
     assert_eq!(parse(&config, b"\"a\\\"b\",c\n"), rows(&[&["a\"b", "c"]]));
@@ -364,6 +428,10 @@ fn strict_true_still_treats_leading_quote_as_quoting() {
     // quote is still a quoted field.
     let config = Config::new().quote_style(QuoteStyle::Strict(true));
     assert_eq!(parse(&config, b"\"a,b\",c\n"), rows(&[&["a,b", "c"]]));
+    // also after a delimiter, where the quote is not structural inside an unquoted field. Repeated
+    // to fill whole vectors: the skipping variants run the last partial vector byte by byte
+    let records = b"c,\"a,b\"\n".repeat(40);
+    assert_eq!(parse(&config, &records), vec![vec!["c".to_string(), "a,b".to_string()]; 40]);
 }
 
 #[test]

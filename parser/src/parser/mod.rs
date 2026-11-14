@@ -19,8 +19,7 @@ pub use zerocopy::ZeroCopyParser;
 enum Exit {
     EndRecord,
     Refill,
-    FieldEndsFull,
-    Error,
+    FieldEndsFull, Error,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -63,3 +62,30 @@ impl std::error::Error for Error {
         }
     }
 }
+
+/// Defines whether the parser uses the same or a state specific set of structural bytes for SIMD
+/// classification.
+///
+/// The marker structs are [`Shared`] and [`PerState`].
+pub trait Sets: Copy + Default {
+    const PER_STATE: bool;
+}
+
+/// Use [`structural_bytes`](crate::classifier::structural_bytes) in both output states, so the
+/// mask does not depend on the state.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Shared;
+
+impl Sets for Shared {
+    const PER_STATE: bool = false;
+}
+
+/// Use the set of structural bytes of the current output state (normal or quoted field), to reduce
+/// the number of false positives.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct PerState;
+
+impl Sets for PerState {
+    const PER_STATE: bool = true;
+}
+
