@@ -939,31 +939,34 @@ def build_kaggle(out: Path | None = None) -> Path:
             # (Unprobed is a different thing, read off `fetched`.)
             pl.col("capped").fill_null(False).alias("truncated"),
             # Inside the first `n_probed` members, so the bundle pass queued a
-            # head for it. The rest are past the probe cap and nothing
-            # schedules them, so `render_kaggle` counts them apart.
+            # head for it. The rest are past the probe cap and are left out of
+            # the index below.
             (pl.col("position") < pl.col("n_probed")).alias("in_probe_cap"),
             pl.col("path").str.extract(r"\.([^./]+)$").str.to_lowercase().alias("ext"),
         )
     )
     collapsed = (
         exploded
+        # Only files the probe considers are indexed, as on GitHub: the pool
+        # is the first `n_probed` files of each dataset, and everything below
+        # (the duplicate counts too) is counted over that pool. The bundle log
+        # still has the rest, and raising `--per-dataset` followed by a
+        # rebuild brings them in.
+        .filter(pl.col("in_probe_cap"))
+        .drop("in_probe_cap")
         .group_by("content_key")
         .agg(
             pl.len().alias("occurrences"),
             pl.col("full_name").n_unique().alias("n_repos"),
-            # Per content, not per row: one copy inside some dataset's probe
-            # prefix is enough for the head to have been queued, and the head
-            # joins on content_key -- so it describes every copy.
-            pl.col("in_probe_cap").any(),
             # One representative row per distinct content, chosen
             # deterministically so rebuilds name the same source.
-            pl.all().exclude("in_probe_cap").sort_by("full_name").first(),
+            pl.all().sort_by("full_name").first(),
         )
         .with_columns(pl.col("ref_pin").alias("ref"))
         .select(
             "source", "owner", "full_name", "repo_id", "path", "content_key",
             "size", "raw_size", "bucket", "is_lfs", "lfs_suspect", "blob_sha",
-            "tier", "ext", "truncated", "in_probe_cap", "ref", "occurrences",
+            "tier", "ext", "truncated", "ref", "occurrences",
             "n_repos",
             # Kaggle-only, and the reason a member can be fetched at all: where
             # its bytes sit inside the bundle, and how they are framed.
@@ -1018,23 +1021,14 @@ def pool_for(source: str = "github") -> pl.LazyFrame:
 def _kaggle_coverage(pool: pl.LazyFrame) -> list[str]:
     """The lines under the probed count: why each unprobed file is unprobed.
 
-    Unlike GitHub, an untried file is outstanding work only inside the probe
-    prefix, where `kaggle.revisits` retries failed or dropped heads. A file
-    past the cap waits for `--per-dataset` to be raised. Content with any copy
-    inside a prefix counts as queued.
+    Every indexed file is inside some dataset's probe prefix, where
+    `kaggle.revisits` retries failed or dropped heads.
     """
     names = pool.collect_schema().names()
     if "fetched" not in names:
         return []
-    inside = (pl.col("in_probe_cap").fill_null(True) if "in_probe_cap" in names
-              else pl.lit(True))
-    past = int(pool.filter(~pl.col("fetched").fill_null(False) & ~inside)
-               .select(pl.len()).collect(engine="streaming").item())
-    untried, failed = _unfetched(pool.filter(inside))
+    untried, failed = _unfetched(pool)
     out = []
-    if past:
-        out.append(f"  {past:,} past the probe cap -- raise --per-dataset "
-                   f"to reach them")
     if failed:
         codes = "  ".join(f"{label}:{n:,}" for label, n in failed[:6])
         rest = sum(n for _, n in failed[6:])
@@ -1074,7 +1068,7 @@ def render_kaggle() -> str:
     if KAGGLE_DATASETS.exists():
         # Per listed file, before dedup: which cap a file stopped at is a fact
         # about its dataset, not its content. Files past the recording cap are
-        # not in the index at all; files past the probe cap are, unprobed.
+        # not in the log; files past the probe cap are in the log only.
         sets = pl.read_parquet(KAGGLE_DATASETS)
         capped = int(sets["capped"].fill_null(False).sum())
         listed = int(sets["n_kept"].sum())
@@ -1101,7 +1095,7 @@ def render_kaggle() -> str:
         out.append(f"  {recorded:,} recorded · {listed - recorded:,} past the "
                    f"recording cap, in {capped:,} datasets")
         out.append(f"  {queued:,} queued for a head · {recorded - queued:,} "
-                   f"recorded past the probe cap")
+                   f"recorded past the probe cap, not indexed")
     out.append(
         f"{totals[2]:,} csv files · {totals[0]:,} unique content · "
         f"{totals[3]:,} datasets · {human(totals[1])} deduplicated")

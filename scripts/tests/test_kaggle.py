@@ -1039,9 +1039,9 @@ class IndexBuild(unittest.TestCase):
         refs = set(index.kaggle_files().collect()["full_name"])
         self.assertEqual(refs, {"o/good"})
 
-    def test_a_file_is_in_the_probe_cap_if_any_copy_of_it_is(self):
-        """The head joins on content, so one copy inside some dataset's probe
-        prefix is enough for every copy to have been queued."""
+    def test_only_files_inside_a_probe_cap_are_indexed(self):
+        """One copy inside some dataset's probe prefix is enough, and the row
+        then names that dataset."""
         from csvscrape import index
 
         root = self._root()
@@ -1052,9 +1052,9 @@ class IndexBuild(unittest.TestCase):
         self._write_bundles(root, [big,
                                    self._record("o/small", [("s.csv", shared)])])
         index.build_kaggle()
-        rows = {r["path"]: r["in_probe_cap"]
+        rows = {r["path"]: r["full_name"]
                 for r in index.kaggle_files().collect().to_dicts()}
-        self.assertEqual(rows, {"p.csv": True, "q.csv": True, "r.csv": False})
+        self.assertEqual(rows, {"p.csv": "o/big", "s.csv": "o/small"})
 
 
 
@@ -1241,7 +1241,7 @@ class RevisitingBundledDatasets(unittest.TestCase):
 
         index.build_kaggle()
         rows = index.kaggle_files().collect()
-        self.assertEqual(int(rows["in_probe_cap"].sum()), 3)
+        self.assertEqual(rows.height, 3)
         sets = index.pl.read_parquet(index.KAGGLE_DATASETS)
         self.assertEqual(sets["n_probed"].to_list(), [3])
 

@@ -334,8 +334,11 @@ def run(
     source: str = "github",
     on_event: Any = None,
     review: str = "disagreements",
+    repo_balance: float = 0.0,
 ) -> dict[str, Any]:
     emit = on_event or (lambda *a, **k: None)
+    if not 0.0 <= repo_balance <= 1.0:
+        return {"error": f"--repo-balance {repo_balance} is outside 0..1"}
     if min_size is not None and max_size is not None and min_size > max_size:
         return {"error": f"--min-size {min_size:,} is above "
                          f"--max-size {max_size:,}: nothing can be drawn"}
@@ -417,6 +420,7 @@ def run(
             rows, short = sample.draw(
                 deficit, seed=seed + rnd, per_repo=per_repo, per_owner=per_owner,
                 exclude=kept | rejected, select=selector, pool=pool, mode=mode,
+                repo_balance=repo_balance,
             )
             if rows.is_empty():
                 break
@@ -482,7 +486,7 @@ def run(
             "selector": selector.name, "sampling": mode, "utf8": utf8,
             "seed": seed, "count": n, "max_bucket": max_bucket,
             "min_size": min_size, "max_size": max_size,
-            "source": source,
+            "source": source, "repo_balance": repo_balance,
             "index_watermark": index.heads_watermark(source),
         }
         stats["definition"] = str(dataset_mod.build(

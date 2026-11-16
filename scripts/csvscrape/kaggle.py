@@ -156,9 +156,9 @@ MAX_FILES_PER_DATASET = 250
 
 # Members whose coordinates are written to the log, whether or not they are
 # probed. Recording more than is probed is what makes the probe cap a decision
-# that can be revisited: the rows are already in the index, unprobed, so
-# raising `--per-dataset` later adds head fetches rather than another pass
-# over every archive's central directory.
+# that can be revisited: the coordinates are already in the log, so raising
+# `--per-dataset` later adds head fetches rather than another pass over every
+# archive's central directory. Only the probed prefix reaches the index.
 #
 # A log-size decision rather than a statistical one. The recorded set is in
 # hash order and the probed set is its prefix, so raising the cap re-probes

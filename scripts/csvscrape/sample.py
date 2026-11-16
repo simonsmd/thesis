@@ -3,16 +3,16 @@
 Two datasets are wanted and they want opposite things, so the draw is
 parameterised by which one is being built rather than duplicated:
 
-  * **log-uniform** over size, for throughput benchmarking. Density
-    proportional to 1/size, which over log2 octaves is simply an equal count
-    per bucket. Buckets are not equally supplied though -- bucket 13 holds
+  * **log-uniform** over size, for throughput benchmarking: an equal count
+    per log2 octave. Buckets are not equally supplied though -- bucket 13 holds
     thousands of files while bucket 30 may hold two -- so a flat N/B quota
     would silently under-deliver. Allocation is therefore water-filling: every
     bucket is offered an equal share, whatever a starved bucket cannot take is
     returned to the pot, and the surplus is redistributed among buckets that
-    still have capacity until N is met or the pool runs dry. Within an octave,
-    candidates are weighted by 1/size so the distribution is log-uniform inside
-    the bucket as well, not merely across octaves.
+    still have capacity until N is met or the pool runs dry. Within an octave
+    every file is equally likely. The pool is already close to log-uniform
+    inside an octave, so an extra 1/size weight there pushed files to the
+    lower end (36/28/21/15% per quarter octave instead of 29/27/23/20%).
 
   * **uniform** over the pool, for correctness and cross-parser comparison.
     Size carries no information there, so stratifying by it would be a
@@ -28,7 +28,6 @@ deficit arithmetic describe both without a second code path.
 """
 from __future__ import annotations
 
-import math
 import random
 from typing import Any
 
@@ -202,9 +201,9 @@ def projected_bytes(quota: dict[int, int], mode: str = LOG_UNIFORM,
     the two modes need different arithmetic because they weight sizes
     differently:
 
-      * log-uniform draws within an octave with density 1/size, so the expected
-        size is the *log* midpoint of the octave rather than the pool's mean
-        there. Equal counts per octave then means the top bucket dominates: at
+      * log-uniform draws an equal count per octave, and the middle of the
+        octave is used as the expected size. Equal counts per octave means
+        the top bucket dominates: at
         `-n 1000` over buckets 6-31, the ~38 files landing in bucket 31 are
         ~76 GB on their own against a few megabytes from the bottom twenty.
       * uniform draws with the pool's own size distribution, so the expected
@@ -226,8 +225,16 @@ def draw(
     pool: pl.LazyFrame | None = None,
     mode: str = LOG_UNIFORM,
     utf8: bool = False,
+    repo_balance: float = 0.0,
 ) -> tuple[pl.DataFrame, dict[int, int]]:
     """Pick files to satisfy an explicit per-stratum quota.
+
+    `repo_balance` sets how much a repo's file count matters. Each file is
+    weighted by 1 / (files its repo has in the stratum) ** repo_balance: 0
+    gives every file the same chance, so a repo with 5000 files is 5000 times
+    as likely to be picked as a repo with one; 1 gives every repo in the
+    stratum the same chance. The per-repo and per-owner caps only limit how
+    many files one repo contributes, not how likely it is to be picked at all.
 
     Returns (rows, shortfall_by_stratum).
     """
@@ -247,9 +254,8 @@ def draw(
     for bucket in sorted(quota, reverse=True):
         want = quota[bucket]
         # Only this stratum is ever materialised, and only a few multiples of
-        # `headroom` rows of it. Sizes inside one octave span a factor of two,
-        # so a uniform pre-sample barely moves the 1/size weighting applied
-        # below, and the headroom keeps the diversity caps workable.
+        # `headroom` rows of it. The headroom keeps the diversity caps
+        # workable.
         #
         # The thinning is a hash residue of the content key, applied while the
         # stratum streams past, so the stratum is never held in memory (a
@@ -257,27 +263,25 @@ def draw(
         # uniform and seeded, so the draw stays a reproducible uniform
         # pre-sample.
         headroom = max(want * 100, 2_000)
-        modulus = max(1, supplies.get(bucket, 0) // (headroom * 2))
         sub_seed = _substream(seed, bucket)
-        rows = (
-            index.compact_strings(
-                _stratum_rows(available, bucket, mode)
-                .filter(pl.col("content_key").hash(seed=sub_seed) % modulus == 0)
-            )
-            .collect(engine="streaming")
-            .filter(pl.int_range(pl.len()).shuffle(seed=sub_seed) < headroom)
-            .to_dicts()
-        )
-        # Log-uniform weights by 1/size, which makes the draw log-uniform
-        # *within* the octave and not just across octaves. A uniform draw
-        # weights every row equally -- with equal weights the sampling below
-        # degenerates to a plain random permutation, which is exactly what is
-        # wanted, so the two modes differ by this line alone.
-        if mode == UNIFORM:
-            weights = [1.0] * len(rows)
+        if repo_balance:
+            order = _balanced_order(available, bucket, mode, repo_balance,
+                                    sub_seed, headroom)
         else:
-            weights = [1.0 / max(r["size"], 1) for r in rows]
-        order = _weighted_shuffle(rows, weights, rng)
+            modulus = max(1, supplies.get(bucket, 0) // (headroom * 2))
+            rows = (
+                index.compact_strings(
+                    _stratum_rows(available, bucket, mode)
+                    .filter(pl.col("content_key").hash(seed=sub_seed) % modulus == 0)
+                )
+                .collect(engine="streaming")
+                .filter(pl.int_range(pl.len()).shuffle(seed=sub_seed) < headroom)
+                .to_dicts()
+            )
+            # Every file in the stratum is equally likely in both modes; the
+            # modes differ only in what a stratum is.
+            rng.shuffle(rows)
+            order = rows
 
         taken = 0
         deferred: list[dict[str, Any]] = []
@@ -336,17 +340,47 @@ def _stratum_rows(pool: pl.LazyFrame, value: int, mode: str) -> pl.LazyFrame:
     return pool.filter(pl.col("bucket") == value)
 
 
-def _weighted_shuffle(rows: list[dict], weights: list[float], rng: random.Random) -> list[dict]:
-    """Order rows by weighted sampling without replacement (Efraimidis-Spirakis).
+def _balanced_order(pool: pl.LazyFrame, value: int, mode: str, balance: float,
+                    seed: int, limit: int) -> list[dict]:
+    """The first `limit` rows of a weighted shuffle of one stratum, with each
+    file's weight divided by its repo's file count ** `balance`.
 
-    Done in log space. The textbook key is `u ** (1/w)`, but here `w` is
-    `1/size`, so the key is `u ** size`, which underflows to 0.0 for anything
-    past a couple of kilobytes. `-log(u) / w` is the same distribution with
-    the smallest key winning, and holds its precision at every size.
+    The unbalanced path first thins the stratum to a uniform random subset of
+    files and weights that. Here the subset would be mostly files from the
+    largest repos, and the small repos the weighting is meant to favour would
+    be missing from it. So the whole stratum is ranked instead, by weighted
+    sampling without replacement (Efraimidis-Spirakis keys in log space),
+    computed in Polars from a seeded hash, and only the `limit` lowest keys
+    are kept.
+
+    The ranking reads only the two columns it needs; the full rows are read
+    afterwards for the winners alone. Sorting full rows of the whole GitHub
+    pool took ~20 GB.
     """
-    keyed = [
-        (-math.log(rng.random() or 5e-324) / w if w > 0 else math.inf, i)
-        for i, w in enumerate(weights)
-    ]
-    keyed.sort()
-    return [rows[i] for _, i in keyed]
+    rows = _stratum_rows(pool, value, mode)
+    narrow = rows.select("content_key", "repo_id")
+    repo_files = narrow.group_by("repo_id").agg(pl.len().alias("_repo_files"))
+    # A uniform number in (0, 1) per file: the top 53 bits of the hash, so the
+    # float is exact and never 0 or 1.
+    u = ((pl.col("content_key").hash(seed=seed) // 2 ** 11).cast(pl.Float64) + 0.5) / 2.0 ** 53
+    # log(-log(u) / weight), smallest first.
+    key = (-u.log()).log() + balance * pl.col("_repo_files").cast(pl.Float64).log()
+    winners = (
+        index.compact_strings(
+            narrow.join(repo_files, on="repo_id")
+            .select("content_key", key.alias("_key"))
+            .bottom_k(limit, by=["_key", "content_key"])
+        )
+        .collect(engine="streaming")
+    )
+    return (
+        index.compact_strings(
+            rows.filter(pl.col("content_key").is_in(winners["content_key"].implode()))
+        )
+        .collect(engine="streaming")
+        .join(winners, on="content_key")
+        .sort("_key", "content_key")
+        .drop("_key")
+        .to_dicts()
+    )
+

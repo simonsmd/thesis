@@ -853,52 +853,6 @@ class SelectorVerifiers(unittest.TestCase):
         self.assertIn("dialect_drift", dialect_holds(self._file(data), {"delimiter": ","}))
 
 
-@unittest.skipUnless(HAVE_POLARS, "polars not installed")
-class WeightedShuffle(unittest.TestCase):
-    """1/size weighting within an octave. The textbook `u ** (1/w)` key underflows
-    for large files, so the shuffle must still work there."""
-
-    def setUp(self):
-        from csvscrape import sample
-
-        self.sample = sample
-
-    def _order(self, size: int, seed: int) -> list[int]:
-        import random
-
-        rows = [{"i": i, "size": size} for i in range(40)]
-        weights = [1.0 / size] * len(rows)
-        picked = self.sample._weighted_shuffle(rows, weights, random.Random(seed))
-        return [r["i"] for r in picked]
-
-    def test_large_files_are_actually_shuffled(self):
-        for exponent in (11, 16, 20, 30):
-            size = 2 ** exponent
-            self.assertNotEqual(self._order(size, 0), list(range(40)),
-                                f"bucket {exponent} came back in index order")
-
-    def test_seed_changes_the_order(self):
-        size = 2 ** 30
-        self.assertNotEqual(self._order(size, 0), self._order(size, 1))
-
-    def test_same_seed_reproduces(self):
-        self.assertEqual(self._order(2 ** 24, 7), self._order(2 ** 24, 7))
-
-    def test_smaller_files_are_favoured_within_a_bucket(self):
-        """1/size weighting must survive into the large buckets too."""
-        import random
-
-        rows = [{"i": i, "size": 2 ** 30 if i % 2 else 2 ** 29} for i in range(200)]
-        weights = [1.0 / r["size"] for r in rows]
-        wins = 0
-        for seed in range(300):
-            order = self.sample._weighted_shuffle(rows, weights, random.Random(seed))
-            wins += order[0]["size"] == 2 ** 29
-        # Chance is 150, the 2:1 weighting predicts ~200. Anything comfortably
-        # above chance shows the weight survived into a 2**30-sized bucket.
-        self.assertGreater(wins, 175)
-
-
 class DiversityBudgetOrder(unittest.TestCase):
     """The per-repo and per-owner caps are one global budget, so the scarce large
     buckets must claim it first."""
@@ -925,6 +879,38 @@ class DiversityBudgetOrder(unittest.TestCase):
         got = picked.group_by("bucket").len().to_dicts()
         by_bucket = {r["bucket"]: r["len"] for r in got}
         self.assertEqual(by_bucket.get(30), 2, "scarce bucket went short")
+
+
+class RepoBalance(unittest.TestCase):
+    """One repo with 1000 files next to 100 repos with one file each."""
+
+    @unittest.skipUnless(HAVE_POLARS, "polars not installed")
+    def test_balance_stops_one_large_repo_from_dominating(self):
+        import polars as pl
+
+        from csvscrape import sample
+
+        rows = [{"content_key": f"big{i}", "repo_id": 0, "owner": "big",
+                 "full_name": "big/data", "path": f"p{i}.csv",
+                 "size": 2 ** 10 + i, "bucket": 10, "is_lfs": False}
+                for i in range(1000)]
+        rows += [{"content_key": f"small{i}", "repo_id": i + 1, "owner": f"o{i}",
+                  "full_name": f"o{i}/r", "path": "f.csv",
+                  "size": 2 ** 10 + i, "bucket": 10, "is_lfs": False}
+                 for i in range(100)]
+        pool = pl.LazyFrame(rows)
+        for mode, quota in ((sample.UNIFORM, {sample.WHOLE_POOL: 50}),
+                            (sample.LOG_UNIFORM, {10: 50})):
+            big = {}
+            for balance in (0.0, 1.0):
+                # Caps high enough not to matter: only the weighting is tested.
+                picked, _ = sample.draw(quota, seed=0, per_repo=1000,
+                                        per_owner=1000, pool=pool, mode=mode,
+                                        repo_balance=balance)
+                self.assertEqual(picked.height, 50)
+                big[balance] = int((picked["repo_id"] == 0).sum())
+            self.assertGreater(big[0.0], 30, mode)
+            self.assertLess(big[1.0], 5, mode)
 
 
 @unittest.skipUnless(HAVE_POLARS, "polars not installed")
@@ -4315,26 +4301,6 @@ class TheDrawHasTwoShapes(unittest.TestCase):
         self.assertGreater(counts[10], 45, f"small files under-drawn: {counts}")
         self.assertLess(counts.get(20, 0), 3, f"large files over-drawn: {counts}")
         self.assertGreater(counts[10], 5 * counts.get(15, 0))
-
-    def test_uniform_does_not_favour_the_small_end_within_a_size(self):
-        """Log-uniform weights by 1/size *inside* an octave, which is exactly
-        the tilt a uniform draw must not have."""
-        import statistics
-
-        pool = self.sample.candidates(select="main").filter(
-            __import__("polars").col("bucket") == 10)
-        # One octave only, so the per-octave allocation cannot be what shows.
-        sizes = {}
-        for mode in (self.sample.LOG_UNIFORM, self.sample.UNIFORM):
-            picked, _ = self.sample.draw({10: 300} if mode == self.sample.LOG_UNIFORM
-                                         else {self.sample.WHOLE_POOL: 300},
-                                         seed=3, per_repo=5, per_owner=5,
-                                         select="main", pool=pool, mode=mode)
-            sizes[mode] = statistics.mean(picked["size"])
-        self.assertLess(sizes[self.sample.LOG_UNIFORM], sizes[self.sample.UNIFORM],
-                        "the 1/size weighting did not distinguish the modes")
-
-
 
     def test_both_modes_are_reproducible_from_the_seed(self):
         for mode in (self.sample.LOG_UNIFORM, self.sample.UNIFORM):

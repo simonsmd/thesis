@@ -217,7 +217,8 @@ def _cmd_download(args) -> int:
     # as their own progress.
     dataset = args.dataset or (
         ("" if args.source == "github" else f"{args.source}-")
-        + f"{args.select}-{args.sampling}" + ("-utf8" if args.utf8 else ""))
+        + f"{args.select}-{args.sampling}" + ("-utf8" if args.utf8 else "")
+        + (f"-balance{args.repo_balance:g}" if args.repo_balance else ""))
     def _client(rep):
         if args.source == "kaggle":
             from .kaggle import Kaggle
@@ -233,7 +234,7 @@ def _cmd_download(args) -> int:
         max_size=args.max_size, sniff=not args.no_sniff,
         sniffers_which=tuple(x.strip() for x in args.sniffers.split(',') if x.strip()),
         sniff_procs=args.sniff_procs, source=args.source, on_event=rep,
-        review=args.review))
+        review=args.review, repo_balance=args.repo_balance))
     print(download.summary(stats))
     if stats.get("interrupted"):
         print("  interrupted -- downloaded files are kept; re-run to continue")
@@ -477,8 +478,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--workers", type=int, default=8)
     p.add_argument("--per-repo", type=int, default=2,
-                   help="soft cap on files taken from one repo per bucket")
+                   help="soft cap on files taken from one repo in the whole "
+                        "dataset; only exceeded when a bucket cannot be "
+                        "filled otherwise")
     p.add_argument("--per-owner", type=int, default=5, help="soft cap per owner")
+    p.add_argument("--repo-balance", type=float, default=0.0,
+                   help="how much a repo's (or Kaggle dataset's) file count "
+                        "matters, from 0 to 1. Each file is weighted by "
+                        "1 / (files its repo has in the size bucket, or in the "
+                        "whole pool for a uniform draw) ** value. "
+                        "0 (default) = every file equally likely, so large "
+                        "repos dominate; 1 = every repo equally likely. The "
+                        "caps above only limit files per repo, not how often "
+                        "large repos are picked")
     p.add_argument("--select", default="main",
                    help="named selector deciding which slice of the pool to draw "
                         "from (default: main, which excludes only what is "
@@ -661,11 +673,11 @@ def build_parser() -> argparse.ArgumentParser:
                         "signed once more and read at its recorded offsets, "
                         "and nothing already described is fetched again")
     p.add_argument("--record-members", type=int, default=KAGGLE_RECORD_MEMBERS,
-                   help="members whose coordinates reach the log and the "
-                        "index, probed or not. Recording more than is probed "
-                        "is what makes --per-dataset revisitable: the rows are "
-                        "already indexed, so raising it adds head fetches "
-                        "instead of a second pass over every archive")
+                   help="members whose coordinates reach the log, probed or "
+                        "not. Only the probed ones are indexed. Recording "
+                        "more than is probed is what makes --per-dataset "
+                        "revisitable: raising it adds head fetches instead "
+                        "of a second pass over every archive")
     p.add_argument("--head-bytes", type=int, default=None,
                    help=f"bytes to read from the start (default {config.HEAD_BYTES:,})")
     p.add_argument("--cache", action="store_true",
