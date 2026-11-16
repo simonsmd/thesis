@@ -73,13 +73,13 @@ struct RunArgs {
     parsers: ParserArgs,
     /// Parse unmeasured for at least this long before sampling, per file and parser (ms). At least
     /// one parse is made: on a file that takes longer than this, that one parse is the warmup.
-    #[arg(long, default_value_t = 300)]
+    #[arg(long, default_value_t = 50)]
     warmup: u64,
     /// Measured samples per file and parser.
-    #[arg(long, short, default_value_t = 10)]
+    #[arg(long, short, default_value_t = 3)]
     samples: usize,
     /// Repeat the parse within a sample until a sample takes at least this long (ms).
-    #[arg(long, default_value_t = 100)]
+    #[arg(long, default_value_t = 20)]
     min_sample_time: u64,
     /// Read size of the parser buffers.
     #[arg(long, default_value = "64K")]
