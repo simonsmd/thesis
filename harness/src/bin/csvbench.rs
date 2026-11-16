@@ -17,9 +17,11 @@
 //! - `result`: one parser on one file: its statistics, or why it was not measured
 //! - `sample`: one measurement
 //! - `end`: the run completed
+//!
+//! `show` prints the summary of a result file again, the same one `run` prints at the end.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::{self, File},
     hint::black_box,
     io::{BufRead, BufReader, BufWriter, Write},
@@ -49,6 +51,8 @@ enum Command {
     Run(RunArgs),
     /// Compare two result files per file and parser.
     Compare(CompareArgs),
+    /// Print the summary of a result file, as `run` prints it at the end.
+    Show(ShowArgs),
     /// Show the files a selection resolves to, without running anything.
     List(ListArgs),
     /// Show the parser names, optionally filtered.
@@ -63,6 +67,14 @@ struct ParserArgs {
     /// Parsers to leave out, as globs (repeatable).
     #[arg(long, short = 'x')]
     exclude: Vec<String>,
+}
+
+impl ParserArgs {
+    /// Whether the parser of this name is selected, for parsers named in a result file.
+    fn selects(&self, name: &str) -> bool {
+        (self.parser.is_empty() || self.parser.iter().any(|g| parsers::glob(g, name)))
+            && !self.exclude.iter().any(|g| parsers::glob(g, name))
+    }
 }
 
 #[derive(clap::Args)]
@@ -117,6 +129,17 @@ struct CompareArgs {
 }
 
 #[derive(clap::Args)]
+struct ShowArgs {
+    results: PathBuf,
+    #[command(flatten)]
+    parsers: ParserArgs,
+    /// Summarize only the files that every shown parser measured, so that all of them are
+    /// compared on the same files. Parsers that measured no file are left out.
+    #[arg(long)]
+    common: bool,
+}
+
+#[derive(clap::Args)]
 struct ListArgs {
     #[command(flatten)]
     inputs: InputArgs,
@@ -126,6 +149,7 @@ fn main() -> Result<(), String> {
     match Args::parse().command {
         Command::Run(args) => run(args),
         Command::Compare(args) => compare(args),
+        Command::Show(args) => show(args),
         Command::List(args) => list(args),
         Command::Parsers(args) => {
             for parser in parsers::select(&args.parser, &args.exclude)? {
@@ -285,10 +309,18 @@ fn run(args: RunArgs) -> Result<(), String> {
         selection.skipped.len()
     );
 
-    // per parser, one summary per file, for the table at the end
-    let mut summaries: HashMap<&str, Vec<Summary>> = HashMap::new();
-    // files where a parser stopped with an error or disagreed with another, for after the table
-    let mut problems: Vec<Problems> = Vec::new();
+    let mut report = Report {
+        summaries: parsers
+            .iter()
+            .map(|p| (p.name.to_owned(), Vec::new()))
+            .collect(),
+        skipped: selection
+            .skipped
+            .iter()
+            .map(|s| (s.id.clone(), s.reason.clone()))
+            .collect(),
+        problems: Vec::new(),
+    };
 
     for (i, input) in selection.inputs.iter().enumerate() {
         let data = input.read()?;
@@ -319,13 +351,14 @@ fn run(args: RunArgs) -> Result<(), String> {
         // Expected parsing result. Set by the first parser
         let mut expected: Option<(&str, Statistics)> = None;
         let mut file_problems = Problems {
-            input,
+            label: input.label(),
+            path: input.path.display().to_string(),
             ours_run: 0,
             errors: Vec::new(),
             disagreements: Vec::new(),
         };
 
-        for parser in &parsers {
+        for (index, parser) in parsers.iter().enumerate() {
             let result = |status: &str| json!({"type": "result", "file": input.id, "parser": parser.name, "status": status});
 
             if let Err(reason) = (parser.supports)(&input.dialect, data) {
@@ -349,12 +382,7 @@ fn run(args: RunArgs) -> Result<(), String> {
                 Ok(m) => m,
                 Err(error) => {
                     eprintln!("    {:<width$} {error}", parser.name);
-                    match file_problems.errors.iter_mut().find(|(e, _)| *e == error) {
-                        Some((_, parsers)) => parsers.push(parser.name),
-                        None => file_problems
-                            .errors
-                            .push((error.clone(), vec![parser.name])),
-                    }
+                    file_problems.error(&error, parser.name);
                     let mut r = result("error");
                     r["error"] = json!(error);
                     out.line(r)?;
@@ -374,10 +402,7 @@ fn run(args: RunArgs) -> Result<(), String> {
                             "    warning: {} disagrees with {name}: {statistics:?} vs {stats:?}",
                             parser.name
                         );
-                        file_problems.disagreements.push(format!(
-                            "{} vs {name}: {statistics:?} vs {stats:?}",
-                            parser.name
-                        ));
+                        file_problems.disagree(parser.name, statistics, name, stats);
                         r["disagrees_with"] = json!(name);
                     }
                     Some(_) => {}
@@ -385,7 +410,6 @@ fn run(args: RunArgs) -> Result<(), String> {
             }
             out.line(r)?;
 
-            let mut throughputs = Vec::with_capacity(samples.len());
             for (index, sample) in samples.iter().enumerate() {
                 let mut s = json!({
                     "type": "sample",
@@ -401,22 +425,16 @@ fn run(args: RunArgs) -> Result<(), String> {
                     fields.extend(json!(reading).as_object().unwrap().clone());
                 }
                 out.line(s)?;
-                throughputs.push(data.len() as f64 * iterations as f64 / sample.ns as f64);
             }
             out.flush()?;
 
-            let cycles_per_byte: Vec<f64> = samples
-                .iter()
-                .filter_map(|s| {
-                    s.reading
-                        .map(|r| r.cycles as f64 / (data.len() as f64 * iterations as f64))
-                })
-                .collect();
-            let summary = Summary {
-                throughput: median(&mut throughputs),
-                cv: cv(&throughputs),
-                cycles_per_byte: Range::of(&cycles_per_byte),
-            };
+            let summary = Summary::of(
+                &input.id,
+                data.len() as f64 * iterations as f64,
+                samples
+                    .iter()
+                    .map(|s| (s.ns as f64, s.reading.map(|r| r.cycles as f64))),
+            );
             if args.verbose {
                 let cpb = summary.cycles_per_byte.map_or(String::new(), |c| {
                     format!("  {:.3} c/B ({:.3}-{:.3})", c.mean, c.min, c.max)
@@ -428,69 +446,17 @@ fn run(args: RunArgs) -> Result<(), String> {
                     summary.cv * 100.0
                 );
             }
-            summaries.entry(parser.name).or_default().push(summary);
+            report.summaries[index].1.push(summary);
         }
-        if !file_problems.errors.is_empty() || !file_problems.disagreements.is_empty() {
-            problems.push(file_problems);
+        if !file_problems.is_empty() {
+            report.problems.push(file_problems);
         }
     }
 
     out.line(json!({"type": "end", "finished": system::timestamp()}))?;
     out.flush()?;
 
-    println!(
-        "\n{:<width$} {:>6} {:>11} {:>10} {:>9} {:>8} {:>8}",
-        "parser", "files", "GB/s (geo)", "median CV", "c/B (geo)", "c/B min", "c/B max"
-    );
-    for parser in &parsers {
-        let Some(results) = summaries.get(parser.name) else {
-            continue;
-        };
-        let throughputs: Vec<f64> = results.iter().map(|s| s.throughput).collect();
-        let mut cvs: Vec<f64> = results.iter().map(|s| s.cv).collect();
-        let per_file: Vec<f64> = results
-            .iter()
-            .filter_map(|s| s.cycles_per_byte.map(|c| c.mean))
-            .collect();
-        let cpb = match Range::of(&per_file) {
-            Some(c) => format!(" {:>9.3} {:>8.3} {:>8.3}", geomean(&per_file), c.min, c.max),
-            None => String::new(),
-        };
-        println!(
-            "{:<width$} {:>6} {:>11.3} {:>9.2}%{cpb}",
-            parser.name,
-            results.len(),
-            geomean(&throughputs),
-            median(&mut cvs) * 100.0
-        );
-    }
-
-    if !selection.skipped.is_empty() {
-        println!("\nskipped {} files:", selection.skipped.len());
-        for skipped in &selection.skipped {
-            println!("  {:<12} {}", short(&skipped.id), skipped.reason);
-        }
-    }
-    if !problems.is_empty() {
-        println!("\nerrors or disagreements on {} files:", problems.len());
-        for p in &problems {
-            match p.input.path.display().to_string() {
-                path if path == p.input.label() => println!("  {path}"),
-                path => println!("  {} {path}", p.input.label()),
-            }
-            for (error, names) in &p.errors {
-                let parsers = if names.len() == p.ours_run && names.len() > 1 {
-                    format!("all {} of our parsers", names.len())
-                } else {
-                    names.join(", ")
-                };
-                println!("    {error}: {parsers}");
-            }
-            for disagreement in &p.disagreements {
-                println!("    statistics differ: {disagreement}");
-            }
-        }
-    }
+    report.print();
     if let Some((base_path, base)) = &baseline {
         println!("\ncompared to {}:", base_path.display());
         match print_comparison(base, &load_medians(&path)?, |_| true, args.threshold) {
@@ -605,24 +571,163 @@ fn measure(
     Ok(Ok((statistics, iterations, samples)))
 }
 
+/// What `run` prints at the end, and `show` again from a result file.
+struct Report {
+    /// Per parser in run order, one summary per file it measured.
+    summaries: Vec<(String, Vec<Summary>)>,
+    /// `(id, reason)` of the selected files that could not be run.
+    skipped: Vec<(String, String)>,
+    /// Files where a parser stopped with an error or disagreed with another.
+    problems: Vec<Problems>,
+}
+
+impl Report {
+    /// Keep only the summaries of files that every parser with a summary has one for, and return
+    /// how many files that is.
+    fn keep_common(&mut self) -> usize {
+        let mut measured = self.summaries.iter().filter(|(_, s)| !s.is_empty());
+        let mut common: HashSet<String> = match measured.next() {
+            Some((_, first)) => first.iter().map(|s| s.file.clone()).collect(),
+            None => return 0,
+        };
+        for (_, summaries) in measured {
+            let files: HashSet<&str> = summaries.iter().map(|s| s.file.as_str()).collect();
+            common.retain(|f| files.contains(f.as_str()));
+        }
+        for (_, summaries) in &mut self.summaries {
+            summaries.retain(|s| common.contains(&s.file));
+        }
+        common.len()
+    }
+
+    fn print(&self) {
+        let width = parsers::name_width(self.summaries.iter().map(|(name, _)| name.as_str()));
+        println!(
+            "\n{:<width$} {:>6} {:>11} {:>10} {:>9} {:>8} {:>8}",
+            "parser", "files", "GB/s (geo)", "median CV", "c/B (geo)", "c/B min", "c/B max"
+        );
+        for (name, results) in &self.summaries {
+            if results.is_empty() {
+                continue;
+            }
+            let throughputs: Vec<f64> = results.iter().map(|s| s.throughput).collect();
+            let mut cvs: Vec<f64> = results.iter().map(|s| s.cv).collect();
+            let per_file: Vec<f64> = results
+                .iter()
+                .filter_map(|s| s.cycles_per_byte.map(|c| c.mean))
+                .collect();
+            let cpb = match Range::of(&per_file) {
+                Some(c) => format!(" {:>9.3} {:>8.3} {:>8.3}", geomean(&per_file), c.min, c.max),
+                None => String::new(),
+            };
+            println!(
+                "{name:<width$} {:>6} {:>11.3} {:>9.2}%{cpb}",
+                results.len(),
+                geomean(&throughputs),
+                median(&mut cvs) * 100.0
+            );
+        }
+
+        if !self.skipped.is_empty() {
+            println!("\nskipped {} files:", self.skipped.len());
+            for (id, reason) in &self.skipped {
+                println!("  {:<12} {reason}", short(id));
+            }
+        }
+        if !self.problems.is_empty() {
+            println!(
+                "\nerrors or disagreements on {} files:",
+                self.problems.len()
+            );
+            for p in &self.problems {
+                if p.path == p.label {
+                    println!("  {}", p.path);
+                } else {
+                    println!("  {} {}", p.label, p.path);
+                }
+                for (error, names) in &p.errors {
+                    let all_ours = names.len() == p.ours_run
+                        && names.len() > 1
+                        && names.iter().all(|n| parsers::is_ours(n));
+                    let parsers = if all_ours {
+                        format!("all {} of our parsers", names.len())
+                    } else {
+                        names.join(", ")
+                    };
+                    println!("    {error}: {parsers}");
+                }
+                for disagreement in &p.disagreements {
+                    println!("    statistics differ: {disagreement}");
+                }
+            }
+        }
+    }
+}
+
 /// Where parsers failed on one file, for the report after the table.
-struct Problems<'a> {
-    input: &'a harness::inputs::Input,
-    /// Our parsers that were run. Only they report errors: rust-csv parses anything.
+struct Problems {
+    label: String,
+    path: String,
+    /// Our parsers that were run, to say when all of them stopped with the same error.
     ours_run: usize,
     /// Each distinct error, with the parsers that stopped with it.
-    errors: Vec<(String, Vec<&'static str>)>,
+    errors: Vec<(String, Vec<String>)>,
     disagreements: Vec<String>,
+}
+
+impl Problems {
+    fn error(&mut self, error: &str, parser: &str) {
+        match self.errors.iter_mut().find(|(e, _)| e == error) {
+            Some((_, parsers)) => parsers.push(parser.to_owned()),
+            None => self
+                .errors
+                .push((error.to_owned(), vec![parser.to_owned()])),
+        }
+    }
+
+    fn disagree(
+        &mut self,
+        parser: &str,
+        statistics: Statistics,
+        other: &str,
+        expected: Statistics,
+    ) {
+        self.disagreements.push(format!(
+            "{parser} vs {other}: {statistics:?} vs {expected:?}"
+        ));
+    }
+
+    fn is_empty(&self) -> bool {
+        self.errors.is_empty() && self.disagreements.is_empty()
+    }
 }
 
 /// One parser on one file, for the terminal output.
 struct Summary {
+    file: String,
     /// Median over the samples (GB/s).
     throughput: f64,
     /// Coefficient of variation of the throughput.
     cv: f64,
     /// Over the samples; `None` without counters.
     cycles_per_byte: Option<Range>,
+}
+
+impl Summary {
+    /// From `(ns, cycles)` per sample, each parsing `bytes` in all.
+    fn of(file: &str, bytes: f64, samples: impl Iterator<Item = (f64, Option<f64>)>) -> Self {
+        let (mut throughputs, mut cycles_per_byte) = (Vec::new(), Vec::new());
+        for (ns, cycles) in samples {
+            throughputs.push(bytes / ns);
+            cycles_per_byte.extend(cycles.map(|c| c / bytes));
+        }
+        Summary {
+            file: file.to_owned(),
+            throughput: median(&mut throughputs),
+            cv: cv(&throughputs),
+            cycles_per_byte: Range::of(&cycles_per_byte),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -715,17 +820,123 @@ fn load_medians(path: &Path) -> Result<Medians, String> {
 fn compare(args: CompareArgs) -> Result<(), String> {
     let base = load_medians(&args.base)?;
     let new = load_medians(&args.new)?;
-    let selected = |parser: &str| {
-        let included = args.parsers.parser.is_empty()
-            || args.parsers.parser.iter().any(|g| parsers::glob(g, parser));
-        included
-            && !args
-                .parsers
-                .exclude
-                .iter()
-                .any(|g| parsers::glob(g, parser))
+    print_comparison(&base, &new, |p| args.parsers.selects(p), args.threshold)
+}
+
+/// The samples of one parser on one file: `(iterations, [(ns, cycles)])`.
+type Timings = (f64, Vec<(f64, Option<f64>)>);
+
+/// The [`Report`] of a result file, rebuilt from its lines.
+fn show(args: ShowArgs) -> Result<(), String> {
+    let path = &args.results;
+    let file = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut parser_names: Vec<String> = Vec::new();
+    let mut skipped = Vec::new();
+    // `(id, path, bytes)` in run order
+    let mut files: Vec<(String, String, f64)> = Vec::new();
+    let mut results: HashMap<(String, String), Value> = HashMap::new();
+    let mut samples: HashMap<(String, String), Timings> = HashMap::new();
+    let mut finished = false;
+
+    for (n, line) in BufReader::new(file).lines().enumerate() {
+        let line = line.map_err(|e| e.to_string())?;
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            eprintln!("{}:{}: ignoring unparsable line", path.display(), n + 1);
+            continue;
+        };
+        let str_field = |k: &str| value[k].as_str().unwrap_or_default().to_owned();
+        let key = || (str_field("file"), str_field("parser"));
+        match value["type"].as_str() {
+            Some("run") => {
+                parser_names = value["parsers"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|p| p.as_str().map(str::to_owned))
+                    .collect();
+            }
+            Some("skip") => skipped.push((str_field("id"), str_field("reason"))),
+            Some("file") => files.push((
+                str_field("id"),
+                str_field("path"),
+                value["bytes"].as_f64().unwrap_or(f64::NAN),
+            )),
+            Some("result") => {
+                results.insert(key(), value.clone());
+            }
+            Some("sample") => {
+                let entry = samples.entry(key()).or_default();
+                entry.0 = value["iterations"].as_f64().unwrap_or(f64::NAN);
+                entry.1.push((
+                    value["ns"].as_f64().unwrap_or(f64::NAN),
+                    value["cycles"].as_f64(),
+                ));
+            }
+            Some("end") => finished = true,
+            _ => {}
+        }
+    }
+    if !finished {
+        eprintln!("note: the run did not finish, showing what it measured");
+    }
+    parser_names.retain(|name| args.parsers.selects(name));
+
+    let mut report = Report {
+        summaries: parser_names
+            .iter()
+            .map(|p| (p.clone(), Vec::new()))
+            .collect(),
+        skipped,
+        problems: Vec::new(),
     };
-    print_comparison(&base, &new, selected, args.threshold)
+    for (id, file_path, bytes) in &files {
+        let mut problems = Problems {
+            label: short(id).to_owned(),
+            path: file_path.clone(),
+            ours_run: 0,
+            errors: Vec::new(),
+            disagreements: Vec::new(),
+        };
+        for (index, name) in parser_names.iter().enumerate() {
+            let key = (id.clone(), name.clone());
+            let Some(result) = results.get(&key) else {
+                continue;
+            };
+            let status = result["status"].as_str().unwrap_or_default();
+            problems.ours_run += (status != "unsupported" && parsers::is_ours(name)) as usize;
+            match status {
+                "error" => problems.error(result["error"].as_str().unwrap_or_default(), name),
+                "ok" => {
+                    if let Some(other) = result["disagrees_with"].as_str() {
+                        let statistics = |r: &Value| {
+                            serde_json::from_value::<Statistics>(r["statistics"].clone())
+                                .unwrap_or_default()
+                        };
+                        let expected = results
+                            .get(&(id.clone(), other.to_owned()))
+                            .map(statistics)
+                            .unwrap_or_default();
+                        problems.disagree(name, statistics(result), other, expected);
+                    }
+                    if let Some((iterations, samples)) = samples.get(&key) {
+                        let summary = Summary::of(id, bytes * iterations, samples.iter().copied());
+                        report.summaries[index].1.push(summary);
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !problems.is_empty() {
+            report.problems.push(problems);
+        }
+    }
+
+    if args.common {
+        let files = report.keep_common();
+        println!("only the {files} files that every parser shown measured");
+    }
+    report.print();
+    Ok(())
 }
 
 /// The change from `base` to `new` per parser, then the files that changed by more than

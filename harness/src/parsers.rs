@@ -28,7 +28,7 @@ use csv_parser::{
     reference::ReferenceDfa,
     table::TableDfa,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{check::Digest, dialect::Dialect, rust_csv};
 
@@ -43,7 +43,7 @@ pub trait Consumer {
 }
 
 /// What a parse produced, as counts. Every parser does this same work per record in benchmarks.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Statistics {
     pub records: u64,
     pub fields: u64,
@@ -181,10 +181,15 @@ pub struct Parser {
 }
 
 impl Parser {
-    /// Ours, as opposed to rust-csv: expected to agree exactly with [`REFERENCE`].
+    /// Ours, as opposed to a comparison parser: expected to agree exactly with [`REFERENCE`].
     pub fn is_ours(&self) -> bool {
-        self.name.starts_with("compaction/") || self.name.starts_with("zerocopy/")
+        is_ours(self.name)
     }
+}
+
+/// Whether the parser of this name is one of ours, see [`Parser::is_ours`].
+pub fn is_ours(name: &str) -> bool {
+    name.starts_with("compaction/") || name.starts_with("zerocopy/")
 }
 
 impl fmt::Debug for Parser {
