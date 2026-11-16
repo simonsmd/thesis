@@ -20,6 +20,7 @@ fn main() {
 
     let inputs = InputArgs {
         dataset: vec![dataset.clone()],
+        id: Vec::new(),
         file: Vec::new(),
         max_size: None,
         min_size: None,

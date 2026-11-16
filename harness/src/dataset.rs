@@ -174,21 +174,6 @@ impl Store {
             None => entry.sniffed_dialect().map(|d| (d, DialectSource::Sniffed)),
         }
     }
-
-    /// Every file entry of every dataset by content hash, to look up files given by path.
-    ///
-    /// Datasets that fail to load are left out; they are reported when selected by name.
-    pub fn index(&self) -> HashMap<String, FileEntry> {
-        let mut index = HashMap::new();
-        for name in self.dataset_names() {
-            if let Ok(dataset) = self.dataset(&name) {
-                for (hash, entry) in dataset.files {
-                    index.entry(hash).or_insert(entry);
-                }
-            }
-        }
-        index
-    }
 }
 
 /// Parse `overrides.toml`: `[files."<hash>"]` tables, each a full [`Dialect`] plus a `note`.

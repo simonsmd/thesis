@@ -1,26 +1,34 @@
 //! Choosing the files to run on: whole datasets and/or individual paths, with filters.
 
 use std::{
-    collections::HashSet,
-    fmt,
+    collections::{BTreeSet, HashSet},
+    fmt, fs,
+    ops::Bound,
     path::{Path, PathBuf},
     str::FromStr,
 };
 
 use crate::{
-    dataset::{self, DialectSource, Store},
+    dataset::{self, DialectSource, FileEntry, Store},
     dialect::{Byte, Dialect, QuoteStyle, Terminator},
     encoding::Data,
 };
 
 #[derive(Debug, Clone, clap::Args)]
 pub struct InputArgs {
-    /// Dataset from the datasets directory, e.g. `quick` (repeatable).
+    /// Dataset from the datasets directory, e.g. `quick` (repeatable). With `--id`, only those
+    /// files are run, with their dialect from these datasets.
     #[arg(long, short)]
     pub dataset: Vec<String>,
 
-    /// A CSV file to parse (repeatable). A file from the corpus (named by its content hash) gets
-    /// its dataset dialect; any other file starts from RFC 4180. The dialect flags adjust either.
+    /// A corpus file by its key (repeatable): the whole key or a unique prefix of it. It gets its
+    /// dialect from the `--dataset`, which the dialect flags adjust. Without a dataset it starts
+    /// from RFC 4180 and needs dialect flags.
+    #[arg(long)]
+    pub id: Vec<String>,
+
+    /// A CSV file outside the corpus (repeatable). It starts from RFC 4180, which the dialect
+    /// flags adjust.
     #[arg(long, short)]
     pub file: Vec<PathBuf>,
 
@@ -36,7 +44,7 @@ pub struct InputArgs {
     #[arg(long)]
     pub encoding: Vec<String>,
 
-    /// Encoding of `--file` inputs that are not in a dataset, as a Python codec name such as
+    /// Encoding of `--file` inputs and of `--id` inputs without a dataset, as a Python codec name such as
     /// `cp1252` or `utf-16-le`. They are converted to UTF-8 before parsing.
     #[arg(long)]
     pub file_encoding: Option<String>,
@@ -53,30 +61,30 @@ pub struct InputArgs {
     pub dialect: DialectArgs,
 }
 
-/// Dialect adjustments for files given with `--file`.
+/// Dialect adjustments for files given with `--file` or `--id`.
 #[derive(Debug, Clone, Default, clap::Args)]
 pub struct DialectArgs {
-    /// Field delimiter for `--file` inputs.
+    /// Field delimiter for `--file` and `--id` inputs.
     #[arg(long, value_parser = parse_byte)]
     pub delimiter: Option<Byte>,
-    /// Record terminator for `--file` inputs: `crlf` or one character.
+    /// Record terminator for `--file` and `--id` inputs: `crlf` or one character.
     #[arg(long, value_parser = Terminator::parse)]
     pub terminator: Option<Terminator>,
-    /// Quote character for `--file` inputs, or `none`.
+    /// Quote character for `--file` and `--id` inputs, or `none`.
     #[arg(long, value_parser = parse_optional_byte)]
     pub quote: Option<OptionalByte>,
     #[arg(long)]
     pub quote_style: Option<QuoteStyle>,
     #[arg(long)]
     pub quotes_in_unquoted_fields: Option<bool>,
-    /// Escape character for `--file` inputs, or `none`.
+    /// Escape character for `--file` and `--id` inputs, or `none`.
     #[arg(long, value_parser = parse_optional_byte)]
     pub escape: Option<OptionalByte>,
     #[arg(long)]
     pub escape_in_unquoted_fields: Option<bool>,
     #[arg(long)]
     pub double_quote_escape: Option<bool>,
-    /// Comment character for `--file` inputs, or `none`.
+    /// Comment character for `--file` and `--id` inputs, or `none`.
     #[arg(long, value_parser = parse_optional_byte)]
     pub comment: Option<OptionalByte>,
 }
@@ -249,96 +257,99 @@ impl InputArgs {
     /// Resolve the selected files. Errors are for unusable arguments; unusable files end up in
     /// [`Selection::skipped`].
     pub fn resolve(&self) -> Result<Selection, String> {
-        if self.dataset.is_empty() && self.file.is_empty() {
-            return Err("nothing to run on: pass --dataset and/or --file".into());
+        if self.dataset.is_empty() && self.id.is_empty() && self.file.is_empty() {
+            return Err("nothing to run on: pass --dataset, --id and/or --file".into());
+        }
+        // an old manifest can hold a different dialect for the same file, so none is guessed
+        if self.dataset.is_empty() && !self.id.is_empty() && self.dialect.is_empty() {
+            return Err(
+                "--id needs the --dataset to take the dialect from, or dialect flags".into(),
+            );
         }
 
         let store = Store::open(&self.datasets_dir, &self.corpus)?;
+        let datasets = self
+            .dataset
+            .iter()
+            .map(|name| store.dataset(name))
+            .collect::<Result<Vec<_>, _>>()?;
         let mut selection = Selection {
             inputs: Vec::new(),
             skipped: Vec::new(),
-            datasets: Vec::new(),
+            datasets: datasets
+                .iter()
+                .map(|d| (d.name.clone(), d.hash.clone()))
+                .collect(),
             overrides_hash: store.overrides_hash.clone(),
         };
         let mut seen = HashSet::new();
-
-        for name in &self.dataset {
-            let dataset = store.dataset(name)?;
-            selection
-                .datasets
-                .push((dataset.name.clone(), dataset.hash.clone()));
-
-            for (hash, entry) in &dataset.files {
-                if !seen.insert(hash.clone()) || !self.size_ok(entry.size) {
-                    continue;
-                }
-                if !self.encoding.is_empty() {
-                    let class = entry.encoding.as_ref().map(|e| e.class.as_str());
-                    if !self.encoding.iter().any(|e| Some(e.as_str()) == class) {
-                        continue;
-                    }
-                }
-
-                let path = store.corpus_path(hash);
-                let skip = |reason: String| Skipped {
-                    id: hash.clone(),
-                    path: path.clone(),
-                    reason,
-                };
-                let (dialect, dialect_source) = match store.dialect(hash, entry) {
-                    Ok(d) => d,
-                    Err(e) => {
-                        selection
-                            .skipped
-                            .push(skip(format!("incomplete dialect: {e}")));
-                        continue;
-                    }
-                };
-                match path.metadata() {
-                    Ok(m) if m.len() == entry.size => {}
-                    Ok(m) => {
-                        selection.skipped.push(skip(format!(
-                            "size {} in corpus, {} in manifest",
-                            m.len(),
-                            entry.size
-                        )));
-                        continue;
-                    }
-                    Err(e) => {
-                        selection.skipped.push(skip(format!("not in corpus: {e}")));
-                        continue;
-                    }
-                }
-
-                selection.inputs.push(Input {
-                    id: hash.clone(),
-                    path,
-                    size: entry.size,
-                    dataset: Some(dataset.name.clone()),
-                    bucket: entry.bucket,
-                    encoding: entry
-                        .encoding
-                        .as_ref()
-                        .and_then(|e| e.name())
-                        .map(str::to_owned),
-                    dialect,
-                    dialect_source,
-                    dialect_adjusted: false,
-                });
-            }
-        }
-
-        if !self.file.is_empty() {
-            let index = store.index();
-            for path in &self.file {
-                if let Some(input) =
-                    self.file_input(&store, &index, path, &mut selection.skipped)?
-                    && seen.insert(input.id.clone())
-                    && self.size_ok(input.size)
-                {
+        let mut push = |result: Result<Input, Skipped>| match result {
+            Ok(input) => {
+                if seen.insert(input.id.clone()) && self.size_ok(input.size) {
                     selection.inputs.push(input);
                 }
             }
+            Err(skip) => selection.skipped.push(skip),
+        };
+
+        if self.id.is_empty() {
+            for dataset in &datasets {
+                for (key, entry) in &dataset.files {
+                    if !self.encoding.is_empty() {
+                        let class = entry.encoding.as_ref().map(|e| e.class.as_str());
+                        if !self.encoding.iter().any(|e| Some(e.as_str()) == class) {
+                            continue;
+                        }
+                    }
+                    push(self.dataset_input(&store, key, entry, &dataset.name)?);
+                }
+            }
+        } else if datasets.is_empty() {
+            for arg in &self.id {
+                // the corpus keeps files in directories named after the first two characters
+                let dir = arg.get(..2).ok_or_else(|| {
+                    format!("{arg}: without --dataset, give at least 2 characters")
+                })?;
+                let names: Vec<String> = fs::read_dir(store.corpus.join(dir))
+                    .ok()
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .filter_map(|entry| entry.file_name().into_string().ok())
+                    .collect();
+                let key = find_key(&names.iter().map(String::as_str).collect(), arg)
+                    .map_err(|e| format!("{e} in the corpus"))?
+                    .to_owned();
+                let path = store.corpus_path(&key);
+                push(Ok(self.plain_input(key, &path)?));
+            }
+        } else {
+            // with --id, the datasets only supply the dialects
+            let keys: BTreeSet<&str> = datasets
+                .iter()
+                .flat_map(|d| d.files.keys().map(String::as_str))
+                .collect();
+            for arg in &self.id {
+                let key = find_key(&keys, arg).map_err(|e| format!("{e} in the datasets"))?;
+                let (dataset, entry) = datasets
+                    .iter()
+                    .find_map(|d| d.files.get(key).map(|entry| (d, entry)))
+                    .expect("key is from the datasets");
+                push(self.dataset_input(&store, key, entry, &dataset.name)?);
+            }
+        }
+
+        for path in &self.file {
+            // without this, a corpus file would silently run with the default dialect
+            if let (Ok(file), Ok(corpus)) = (path.canonicalize(), store.corpus.canonicalize())
+                && file.starts_with(&corpus)
+            {
+                return Err(format!(
+                    "{}: file is in the corpus, pass it with --id",
+                    path.display()
+                ));
+            }
+            push(Ok(self.plain_input(path.display().to_string(), path)?));
         }
 
         Ok(selection)
@@ -349,72 +360,122 @@ impl InputArgs {
             && self.min_size.is_none_or(|min| size >= min.0)
     }
 
-    fn file_input(
+    /// A dataset file: its override or sniffed dialect, adjusted by the dialect flags.
+    fn dataset_input(
         &self,
         store: &Store,
-        index: &std::collections::HashMap<String, dataset::FileEntry>,
-        path: &Path,
-        skipped: &mut Vec<Skipped>,
-    ) -> Result<Option<Input>, String> {
+        key: &str,
+        entry: &FileEntry,
+        dataset: &str,
+    ) -> Result<Result<Input, Skipped>, String> {
+        let (mut dialect, dialect_source) = match store.dialect(key, entry) {
+            Ok(known) => known,
+            // an incomplete sniffed dialect can still be completed with the flags
+            Err(_) if !self.dialect.is_empty() => (Dialect::default(), DialectSource::Default),
+            Err(e) => {
+                return Ok(Err(skipped(store, key, format!("incomplete dialect: {e}"))));
+            }
+        };
+        let before = dialect.clone();
+        self.dialect.apply(&mut dialect);
+        dialect.validate().map_err(|e| format!("{key}: {e}"))?;
+        let adjusted = dialect != before;
+
+        Ok(
+            corpus_input(store, key, entry, dataset, (dialect, dialect_source)).map(|mut input| {
+                input.dialect_adjusted = adjusted;
+                input
+            }),
+        )
+    }
+
+    /// A file without a known dialect: RFC 4180, adjusted by the dialect flags.
+    fn plain_input(&self, id: String, path: &Path) -> Result<Input, String> {
         let size = path
             .metadata()
             .map_err(|e| format!("{}: {e}", path.display()))?
             .len();
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default();
-
-        let known = dataset::is_content_hash(name).then(|| {
-            let entry = index.get(name);
-            let dialect = match (store.overrides.get(name), entry) {
-                (Some(o), _) => Some(Ok((o.dialect.clone(), DialectSource::Override))),
-                (None, Some(entry)) => Some(store.dialect(name, entry)),
-                (None, None) => None,
-            };
-            (dialect, entry)
-        });
-        let (id, base, entry) = match known {
-            Some((Some(dialect), entry)) => (name.to_owned(), Some(dialect), entry),
-            _ => (path.display().to_string(), None, None),
-        };
-        let bucket = entry.and_then(|e| e.bucket);
-        let encoding = match entry.and_then(|e| e.encoding.as_ref()) {
-            Some(known) => known.name().map(str::to_owned),
-            None => self.file_encoding.clone(),
-        };
-
-        let (mut dialect, dialect_source) = match base {
-            Some(Ok(known)) => known,
-            // an incomplete sniffed dialect can still be completed with the flags
-            Some(Err(e)) if self.dialect.is_empty() => {
-                skipped.push(Skipped {
-                    id,
-                    path: path.to_owned(),
-                    reason: format!("incomplete dialect: {e}"),
-                });
-                return Ok(None);
-            }
-            Some(Err(_)) | None => (Dialect::default(), DialectSource::Default),
-        };
-        let before = dialect.clone();
+        let mut dialect = Dialect::default();
         self.dialect.apply(&mut dialect);
         dialect
             .validate()
             .map_err(|e| format!("{}: {e}", path.display()))?;
 
-        Ok(Some(Input {
+        Ok(Input {
             id,
             path: path.to_owned(),
             size,
             dataset: None,
-            bucket,
-            encoding,
-            dialect_adjusted: dialect != before,
+            bucket: None,
+            encoding: self.file_encoding.clone(),
+            dialect_adjusted: dialect != Dialect::default(),
             dialect,
-            dialect_source,
-        }))
+            dialect_source: DialectSource::Default,
+        })
     }
+}
+
+/// The key an `--id` argument names: a key or a unique prefix of one.
+fn find_key<'a>(keys: &BTreeSet<&'a str>, arg: &str) -> Result<&'a str, String> {
+    // the key equal to `arg` sorts before all others that start with it
+    let mut matches = keys
+        .range::<str, _>((Bound::Included(arg), Bound::Unbounded))
+        .take_while(|key| key.starts_with(arg));
+    match (matches.next(), matches.next()) {
+        (Some(key), _) if *key == arg => Ok(key),
+        (Some(key), None) => Ok(key),
+        (None, _) => Err(format!("{arg}: no file with this key")),
+        (Some(_), Some(_)) => Err(format!(
+            "{arg}: prefix matches {} files",
+            2 + matches.count()
+        )),
+    }
+}
+
+fn skipped(store: &Store, key: &str, reason: String) -> Skipped {
+    Skipped {
+        id: key.to_owned(),
+        path: store.corpus_path(key),
+        reason,
+    }
+}
+
+/// A corpus file with the given dialect, unless the corpus copy does not match the manifest.
+fn corpus_input(
+    store: &Store,
+    key: &str,
+    entry: &FileEntry,
+    dataset: &str,
+    (dialect, dialect_source): (Dialect, DialectSource),
+) -> Result<Input, Skipped> {
+    let path = store.corpus_path(key);
+    match path.metadata() {
+        Ok(m) if m.len() == entry.size => {}
+        Ok(m) => {
+            return Err(skipped(
+                store,
+                key,
+                format!("size {} in corpus, {} in manifest", m.len(), entry.size),
+            ));
+        }
+        Err(e) => return Err(skipped(store, key, format!("not in corpus: {e}"))),
+    }
+
+    Ok(Input {
+        id: key.to_owned(),
+        path,
+        size: entry.size,
+        dataset: Some(dataset.to_owned()),
+        bucket: entry.bucket,
+        encoding: entry
+            .encoding
+            .as_ref()
+            .and_then(|e| e.name())
+            .map(str::to_owned),
+        dialect,
+        dialect_source,
+        dialect_adjusted: false,
+    })
 }
 
 #[cfg(test)]
@@ -441,6 +502,16 @@ mod tests {
         assert_eq!(args.dialect.quote, Some(OptionalByte(None)));
         assert_eq!(args.dialect.escape, Some(OptionalByte(Some(Byte(b'\\')))));
         assert_eq!(args.dialect.comment, Some(OptionalByte(Some(Byte(b'#')))));
+    }
+
+    #[test]
+    fn keys_by_prefix() {
+        let index = BTreeSet::from(["00140e87-401a4", "00140f11-2a", "0014", "3489bbf7"]);
+        assert_eq!(find_key(&index, "0014"), Ok("0014"));
+        assert_eq!(find_key(&index, "00140e8"), Ok("00140e87-401a4"));
+        assert_eq!(find_key(&index, "3489bbf7"), Ok("3489bbf7"));
+        assert!(find_key(&index, "00140").is_err());
+        assert!(find_key(&index, "ff").is_err());
     }
 
     #[test]

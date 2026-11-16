@@ -160,6 +160,11 @@ fn list(args: ListArgs) -> Result<(), String> {
     Ok(())
 }
 
+/// Width of the parser name column: the longest name, at least the header.
+fn name_width<'a>(names: impl Iterator<Item = &'a str>) -> usize {
+    names.map(str::len).max().unwrap_or(0).max("parser".len())
+}
+
 fn short(id: &str) -> &str {
     if harness::dataset::is_content_hash(id) {
         &id[..10]
@@ -187,6 +192,7 @@ impl Output {
 fn run(args: RunArgs) -> Result<(), String> {
     let selection = args.inputs.resolve()?;
     let parsers = parsers::select(&args.parsers.parser, &args.parsers.exclude)?;
+    let width = name_width(parsers.iter().map(|p| p.name));
     let options = Options {
         capacity: args.capacity.0 as usize,
         fields: None,
@@ -347,7 +353,7 @@ fn run(args: RunArgs) -> Result<(), String> {
             let (statistics, iterations, samples) = match measured {
                 Ok(m) => m,
                 Err(error) => {
-                    eprintln!("    {:<40} {error}", parser.name);
+                    eprintln!("    {:<width$} {error}", parser.name);
                     match file_problems.errors.iter_mut().find(|(e, _)| *e == error) {
                         Some((_, parsers)) => parsers.push(parser.name),
                         None => file_problems
@@ -421,7 +427,7 @@ fn run(args: RunArgs) -> Result<(), String> {
                     format!("  {:.3} c/B ({:.3}-{:.3})", c.mean, c.min, c.max)
                 });
                 eprintln!(
-                    "    {:<40} {:>7.3} GB/s ±{:.1}%{cpb}",
+                    "    {:<width$} {:>7.3} GB/s ±{:.1}%{cpb}",
                     parser.name,
                     summary.throughput,
                     summary.cv * 100.0
@@ -438,7 +444,7 @@ fn run(args: RunArgs) -> Result<(), String> {
     out.flush()?;
 
     println!(
-        "\n{:<45} {:>6} {:>11} {:>10} {:>9} {:>8} {:>8}",
+        "\n{:<width$} {:>6} {:>11} {:>10} {:>9} {:>8} {:>8}",
         "parser", "files", "GB/s (geo)", "median CV", "c/B (geo)", "c/B min", "c/B max"
     );
     for parser in &parsers {
@@ -456,7 +462,7 @@ fn run(args: RunArgs) -> Result<(), String> {
             None => String::new(),
         };
         println!(
-            "{:<45} {:>6} {:>11.3} {:>9.2}%{cpb}",
+            "{:<width$} {:>6} {:>11.3} {:>9.2}%{cpb}",
             parser.name,
             results.len(),
             geomean(&throughputs),
@@ -754,8 +760,9 @@ fn print_comparison(
 
     let mut names: Vec<&str> = ratios.keys().copied().collect();
     names.sort();
+    let width = name_width(names.iter().copied());
     println!(
-        "{:<40} {:>6} {:>10} {:>9} {:>9}",
+        "{:<width$} {:>6} {:>10} {:>9} {:>9}",
         "parser", "files", "geo mean", "min", "max"
     );
     for name in &names {
@@ -764,7 +771,7 @@ fn print_comparison(
         let min = r.iter().map(|(_, x)| *x).fold(f64::INFINITY, f64::min);
         let max = r.iter().map(|(_, x)| *x).fold(f64::NEG_INFINITY, f64::max);
         println!(
-            "{name:<40} {:>6} {:>+9.2}% {:>+8.2}% {:>+8.2}%",
+            "{name:<width$} {:>6} {:>+9.2}% {:>+8.2}% {:>+8.2}%",
             r.len(),
             (geomean - 1.0) * 100.0,
             (min - 1.0) * 100.0,
@@ -783,7 +790,7 @@ fn print_comparison(
         println!("\nchanged by more than {threshold}%:");
         for (parser, file, r) in changed {
             println!(
-                "  {:>+8.2}%  {:<40} {}",
+                "  {:>+8.2}%  {:<width$} {}",
                 (r - 1.0) * 100.0,
                 parser,
                 short(file)
