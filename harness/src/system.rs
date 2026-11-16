@@ -12,6 +12,8 @@ pub struct Build {
     pub rustc: &'static str,
     pub rustflags: &'static str,
     pub profile: &'static str,
+    /// Cargo features of the harness, e.g. `csveee`.
+    pub features: Vec<&'static str>,
 }
 
 pub fn build() -> Build {
@@ -21,6 +23,10 @@ pub fn build() -> Build {
         rustc: env!("HARNESS_RUSTC"),
         rustflags: env!("HARNESS_RUSTFLAGS"),
         profile: env!("HARNESS_PROFILE"),
+        features: env!("HARNESS_FEATURES")
+            .split(',')
+            .filter(|f| !f.is_empty())
+            .collect(),
     }
 }
 

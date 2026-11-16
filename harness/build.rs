@@ -56,6 +56,19 @@ fn main() {
     println!("cargo::rustc-env=HARNESS_GIT_DIRTY={dirty}");
     println!("cargo::rustc-env=HARNESS_RUSTC={rustc_version}");
     println!("cargo::rustc-env=HARNESS_RUSTFLAGS={rustflags}");
+    // the enabled cargo features: they add parsers, which also changes the code layout of the
+    // others
+    let mut features: Vec<String> = std::env::vars()
+        .filter_map(|(key, _)| {
+            Some(
+                key.strip_prefix("CARGO_FEATURE_")?
+                    .to_lowercase()
+                    .replace('_', "-"),
+            )
+        })
+        .collect();
+    features.sort();
+    println!("cargo::rustc-env=HARNESS_FEATURES={}", features.join(","));
     println!(
         "cargo::rustc-env=HARNESS_PROFILE={}",
         std::env::var("PROFILE").unwrap_or_default()
