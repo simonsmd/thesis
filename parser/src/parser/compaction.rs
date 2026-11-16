@@ -147,6 +147,10 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
                 write -= shift;
                 self.read_index = write + MIN_GAP;
 
+                for end in &mut self.field_ends[..field_count] {
+                    *end -= shift;
+                }
+
                 if read == 0 {
                     if (self.dfa.in_quoted_field(state)
                         && matches!(self.config.quote_style, QuoteStyle::Strict(_)))
@@ -159,7 +163,7 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
                         return Ok(None);
                     }
 
-                    self.field_ends[field_count] = write - record_start;
+                    self.field_ends[field_count] = write;
                     field_count += 1;
                     break false;
                 }
@@ -193,7 +197,7 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
                 if dfa.is_field_end(state) {
                     // SAFETY: field_end < fields.end, checked after every write
                     unsafe {
-                        field_end.write(write - record_start);
+                        field_end.write(write);
                         field_end = field_end.add(1);
                     }
 
@@ -242,7 +246,8 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
         self.position.record += 1;
 
         Ok(Some(Record {
-            buffer: &self.buffer.data()[record_start..write],
+            buffer: &self.buffer.data()[..write],
+            start: record_start,
             field_ends: &self.field_ends[..field_count],
         }))
     }
@@ -281,8 +286,8 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
                 write -= shift;
                 self.read_index = write + MIN_GAP;
 
-                for i in 0..field_count {
-                    self.field_ends[i] -= shift;
+                for end in &mut self.field_ends[..field_count] {
+                    *end -= shift;
                 }
 
                 // resize field_ends if there is not enough space for the maximum possible amount
@@ -373,12 +378,9 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
 
         self.position.record += 1;
 
-        for i in 0..field_count {
-            self.field_ends[i] -= record_start;
-        }
-
         Ok(Some(Record {
-            buffer: &self.buffer.data()[record_start..write],
+            buffer: &self.buffer.data()[..write],
+            start: record_start,
             field_ends: &self.field_ends[..field_count],
         }))
     }
@@ -421,6 +423,10 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
                 write -= shift;
                 self.read_index = write + MIN_GAP;
 
+                for end in &mut self.field_ends[..field_count] {
+                    *end -= shift;
+                }
+
                 if read == 0 {
                     if (self.dfa.in_quoted_field(state)
                         && matches!(self.config.quote_style, QuoteStyle::Strict(_)))
@@ -433,7 +439,7 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
                         return Ok(None);
                     }
 
-                    self.field_ends[field_count] = write - record_start;
+                    self.field_ends[field_count] = write;
                     field_count += 1;
                     break false;
                 }
@@ -499,7 +505,7 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
                     if dfa.is_field_end(state) {
                         // SAFETY: field_end < fields.end, checked after every write
                         unsafe {
-                            field_end.write(write - record_start);
+                            field_end.write(write);
                             field_end = field_end.add(1);
                         }
 
@@ -549,7 +555,8 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
         self.position.record += 1;
 
         Ok(Some(Record {
-            buffer: &self.buffer.data()[record_start..write],
+            buffer: &self.buffer.data()[..write],
+            start: record_start,
             field_ends: &self.field_ends[..field_count],
         }))
     }
@@ -609,6 +616,10 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
                 write -= shift;
                 self.read_index = write + MIN_GAP;
 
+                for end in &mut self.field_ends[..field_count] {
+                    *end -= shift;
+                }
+
                 if read == 0 {
                     if (self.dfa.in_quoted_field(state)
                         && matches!(self.config.quote_style, QuoteStyle::Strict(_)))
@@ -621,7 +632,7 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
                         return Ok(None);
                     }
 
-                    self.field_ends[field_count] = write - record_start;
+                    self.field_ends[field_count] = write;
                     field_count += 1;
                     break false;
                 }
@@ -667,7 +678,7 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
                     if dfa.is_field_end(state) {
                         // SAFETY: field_end < fields.end, checked after every write
                         unsafe {
-                            field_end.write(write - record_start);
+                            field_end.write(write);
                             field_end = field_end.add(1);
                         }
 
@@ -811,7 +822,8 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
         self.position.record += 1;
 
         Ok(Some(Record {
-            buffer: &self.buffer.data()[record_start..write],
+            buffer: &self.buffer.data()[..write],
+            start: record_start,
             field_ends: &self.field_ends[..field_count],
         }))
     }
@@ -835,6 +847,9 @@ unsafe fn copy_block<C: Classifier>(buffer: &mut [u8], read: usize, write: usize
 #[derive(Debug, Clone, Copy)]
 pub struct Record<'a> {
     buffer: &'a [u8],
+    /// Start of the first field in `buffer`
+    start: usize,
+    /// End of each field in `buffer`, which is also the start of the next field
     field_ends: &'a [usize],
 }
 
@@ -852,7 +867,7 @@ impl<'a> Record<'a> {
     pub fn get(&self, index: usize) -> Option<&'a [u8]> {
         let end = *self.field_ends.get(index)?;
         let start = if index == 0 {
-            0
+            self.start
         } else {
             self.field_ends[index - 1]
         };
@@ -864,7 +879,7 @@ impl<'a> Record<'a> {
         Fields {
             buffer: self.buffer,
             field_ends: self.field_ends.iter(),
-            start: 0,
+            start: self.start,
         }
     }
 

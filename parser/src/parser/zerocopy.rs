@@ -20,7 +20,7 @@ pub struct ZeroCopyParser<R: Read, D: Dfa> {
     reader: R,
     buffer: Buffer,
     read_index: usize,
-    /// stores `[start, end]` index per field, relative to `record_start`
+    /// stores `[start, end]` index per field in the buffer
     fields: Vec<[usize; 2]>,
     position: Position,
     /// The error that stopped this parser, so read_record does not start parsing from an
@@ -115,6 +115,10 @@ impl<R: Read, D: Dfa> ZeroCopyParser<R, D> {
                 record_start -= shift;
                 self.read_index -= shift;
                 write -= shift;
+                for [start, end] in &mut self.fields[..field_count] {
+                    *start -= shift;
+                    *end -= shift;
+                }
 
                 if read == 0 {
                     if (self.dfa.in_quoted_field(state)
@@ -134,7 +138,7 @@ impl<R: Read, D: Dfa> ZeroCopyParser<R, D> {
                         field_start = write;
                     }
 
-                    self.fields[field_count] = [field_start - record_start, write - record_start];
+                    self.fields[field_count] = [field_start, write];
                     field_count += 1;
                     break false;
                 }
@@ -191,7 +195,7 @@ impl<R: Read, D: Dfa> ZeroCopyParser<R, D> {
                 if dfa.is_field_end(state) {
                     // SAFETY: field < fields.end, checked after every write
                     unsafe {
-                        field.write([field_start - record_start, write - record_start]);
+                        field.write([field_start, write]);
                         field = field.add(1);
                     }
                     field_not_started = 1;
@@ -243,7 +247,7 @@ impl<R: Read, D: Dfa> ZeroCopyParser<R, D> {
         self.position.record += 1;
 
         Ok(Some(Record {
-            buffer: &self.buffer.data()[record_start..self.read_index],
+            buffer: &self.buffer.data()[..self.read_index],
             fields: &self.fields[..field_count],
         }))
     }
@@ -612,7 +616,6 @@ impl<R: Read, D: Dfa> ZeroCopyParser<R, D> {
         self.position.record += 1;
 
         Ok(Some(Record {
-            // the field positions are buffer indices
             buffer: &self.buffer.data()[..self.read_index],
             fields: &self.fields[..field_count],
         }))
