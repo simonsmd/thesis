@@ -15,7 +15,7 @@ use xxhash_rust::xxh3::Xxh3;
 
 use crate::{
     dialect::Dialect,
-    parsers::{self, Consumer, ErrorAt, Options, OwnedRecord, Parser, Statistics},
+    parsers::{self, Consumer, ErrorAt, Errors, Options, OwnedRecord, Parser, Statistics},
 };
 
 /// Hashes records with their structure: field count, then each field's length and bytes.
@@ -92,8 +92,9 @@ pub enum Verdict {
 #[derive(Debug, Clone, Serialize)]
 pub struct Outcome {
     pub parser: &'static str,
-    /// One of this crate's parsers rather than rust-csv.
+    /// One of this crate's parsers rather than a comparison parser.
     pub ours: bool,
+    pub errors: Errors,
     pub options: Options,
     #[serde(flatten)]
     pub verdict: Verdict,
@@ -113,11 +114,11 @@ impl Report {
             .filter(|o| matches!(o.verdict, Verdict::Mismatch { .. }))
     }
 
-    /// Mismatches, except rust-csv's where the reference stops with an error: rust-csv never
-    /// reports one, so it is expected to differ there.
+    /// Mismatches, except those of parsers that never report errors where the reference stops
+    /// with one: they are expected to differ there.
     pub fn unexpected_mismatches(&self) -> impl Iterator<Item = &Outcome> {
         self.mismatches()
-            .filter(|o| o.ours || self.reference.error.is_none())
+            .filter(|o| o.errors != Errors::Never || self.reference.error.is_none())
     }
 }
 
@@ -140,7 +141,12 @@ pub fn check(
             if parser.name == reference.name && *options == default {
                 continue;
             }
-            let verdict = match (parser.supports)(dialect) {
+            let errors = (parser.errors)(dialect);
+            let expected = Fingerprint {
+                error: expected.error.map(|e| e.reported(errors)),
+                ..expected
+            };
+            let verdict = match (parser.supports)(dialect, input) {
                 Err(reason) => Verdict::Unsupported { reason },
                 Ok(()) => match fingerprints(parser, dialect, input, options) {
                     [fresh, reset] if fresh == expected && reset == expected => Verdict::Agree,
@@ -161,6 +167,7 @@ pub fn check(
             outcomes.push(Outcome {
                 parser: parser.name,
                 ours: parser.is_ours(),
+                errors,
                 options: *options,
                 verdict,
             });
@@ -183,12 +190,13 @@ pub fn first_difference(
 ) -> String {
     let mut expected = (reference.records)(dialect, input, &Options::default());
     let mut actual = (parser.records)(dialect, input, options);
+    let errors = (parser.errors)(dialect);
     // where the current record starts in the input, according to the reference
     let mut start = 0;
 
     for index in 0.. {
         let (e, a) = (expected.next(), actual.next());
-        if same(&e, &a) {
+        if same(&e, &a, errors) {
             match e {
                 Some(Ok(record)) => {
                     start = record.end;
@@ -228,14 +236,16 @@ pub fn first_difference(
     unreachable!()
 }
 
-/// Equal records and errors; where a record ends is not compared, since parsers count it
-/// differently.
+/// Equal records and errors, as far as the parser reports errors; where a record ends is not
+/// compared, since parsers count it differently.
 fn same(
     e: &Option<Result<OwnedRecord, ErrorAt>>,
     a: &Option<Result<OwnedRecord, ErrorAt>>,
+    errors: Errors,
 ) -> bool {
     match (e, a) {
         (Some(Ok(e)), Some(Ok(a))) => e.fields == a.fields,
+        (Some(Err(e)), Some(Err(a))) => e.reported(errors) == *a,
         _ => e == a,
     }
 }

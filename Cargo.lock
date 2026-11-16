@@ -257,6 +257,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "csveee"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "02cd963a2b3a14303a9e3b5a78e0a8e61cc45607e66cb56534343450058c4236"
+dependencies = [
+ "libc",
+ "windows-sys",
+]
+
+[[package]]
 name = "either"
 version = "1.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -336,6 +346,7 @@ dependencies = [
  "csv",
  "csv-core",
  "csv-parser",
+ "csveee",
  "encoding_rs",
  "libc",
  "libtest-mimic",

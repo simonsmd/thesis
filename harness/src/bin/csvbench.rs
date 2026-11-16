@@ -160,11 +160,6 @@ fn list(args: ListArgs) -> Result<(), String> {
     Ok(())
 }
 
-/// Width of the parser name column: the longest name, at least the header.
-fn name_width<'a>(names: impl Iterator<Item = &'a str>) -> usize {
-    names.map(str::len).max().unwrap_or(0).max("parser".len())
-}
-
 fn short(id: &str) -> &str {
     if harness::dataset::is_content_hash(id) {
         &id[..10]
@@ -192,7 +187,7 @@ impl Output {
 fn run(args: RunArgs) -> Result<(), String> {
     let selection = args.inputs.resolve()?;
     let parsers = parsers::select(&args.parsers.parser, &args.parsers.exclude)?;
-    let width = name_width(parsers.iter().map(|p| p.name));
+    let width = parsers::name_width(parsers.iter().map(|p| p.name));
     let options = Options {
         capacity: args.capacity.0 as usize,
         fields: None,
@@ -333,7 +328,7 @@ fn run(args: RunArgs) -> Result<(), String> {
         for parser in &parsers {
             let result = |status: &str| json!({"type": "result", "file": input.id, "parser": parser.name, "status": status});
 
-            if let Err(reason) = (parser.supports)(&input.dialect) {
+            if let Err(reason) = (parser.supports)(&input.dialect, data) {
                 let mut r = result("unsupported");
                 r["reason"] = reason.into();
                 out.line(r)?;
@@ -760,7 +755,7 @@ fn print_comparison(
 
     let mut names: Vec<&str> = ratios.keys().copied().collect();
     names.sort();
-    let width = name_width(names.iter().copied());
+    let width = parsers::name_width(names.iter().copied());
     println!(
         "{:<width$} {:>6} {:>10} {:>9} {:>9}",
         "parser", "files", "geo mean", "min", "max"

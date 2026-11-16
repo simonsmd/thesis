@@ -3,7 +3,8 @@
 //! Names are `<record construction>/<read_record variant>/<skip>/<dfa>` for this crate's parsers,
 //! with `-` where an axis does not apply, e.g. `compaction/simd/nibble-map-32-state/bitshift`. The
 //! skip is the classifier, its vector width and whether it looks for the structural bytes of each
-//! state or the shared ones. The rust-csv parsers are `csv-core/dfa` and `csv/byte-record`.
+//! state or the shared ones. The rust-csv parsers are `csv-core/dfa` and `csv/byte-record`, and
+//! csveee's parsers are `csveee/simd` and `csveee/dfa` (with the `csveee` feature).
 //! Select them with globs.
 //!
 //! Each entry holds plain function pointers to fully monomorphized drivers, so dispatch costs one
@@ -87,6 +88,33 @@ impl From<Error> for ErrorAt {
     }
 }
 
+/// What a parser reports where the input has an error, which decides how it is compared to the
+/// reference there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Errors {
+    /// The record, field and byte where it stopped, like the reference.
+    Exact,
+    /// Only the byte where it stopped, with record and field 0.
+    Byte,
+    /// None: it parses on where the reference stops, so the two differ on such inputs.
+    Never,
+}
+
+impl ErrorAt {
+    /// The error as a parser that reports errors this way would report it.
+    pub fn reported(self, errors: Errors) -> Self {
+        match errors {
+            Errors::Byte => ErrorAt {
+                record: 0,
+                field: 0,
+                byte: self.byte,
+            },
+            Errors::Exact | Errors::Never => self,
+        }
+    }
+}
+
 impl fmt::Display for ErrorAt {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -143,8 +171,10 @@ pub type Prepare = for<'a> fn(&Dialect, &'a [u8], &Options) -> Box<dyn Prepared<
 
 pub struct Parser {
     pub name: &'static str,
-    /// `Err(reason)` if the parser cannot express the dialect.
-    pub supports: fn(&Dialect) -> Result<(), &'static str>,
+    /// `Err(reason)` if the parser cannot run the input in this dialect.
+    pub supports: fn(&Dialect, &[u8]) -> Result<(), &'static str>,
+    /// What it reports on inputs with an error, in this dialect.
+    pub errors: fn(&Dialect) -> Errors,
     pub prepare: Prepare,
     /// Pull records one at a time from a fresh parser, to locate a difference.
     pub records: for<'a> fn(&Dialect, &'a [u8], &Options) -> Records<'a>,
@@ -163,8 +193,12 @@ impl fmt::Debug for Parser {
     }
 }
 
-fn supports_all(_: &Dialect) -> Result<(), &'static str> {
+fn supports_all(_: &Dialect, _: &[u8]) -> Result<(), &'static str> {
     Ok(())
+}
+
+fn exact_errors(_: &Dialect) -> Errors {
+    Errors::Exact
 }
 
 fn compaction<'a, D: Dfa>(
@@ -282,6 +316,7 @@ macro_rules! entry {
         Parser {
             name: $name,
             supports: supports_all,
+            errors: exact_errors,
             prepare: $prepare::<$($t),*>,
             records: $pull::<$($t),*>,
         }
@@ -483,8 +518,15 @@ pub fn all() -> Vec<Parser> {
     .collect();
     parsers.extend(simd!(BitshiftDfa, "bitshift"));
     parsers.extend(rust_csv::parsers());
+    #[cfg(feature = "csveee")]
+    parsers.extend(crate::csveee::parsers());
     debug_assert_eq!(parsers[0].name, REFERENCE);
     parsers
+}
+
+/// Width of a column of parser names: the longest name, at least the `parser` header.
+pub fn name_width<'a>(names: impl Iterator<Item = &'a str>) -> usize {
+    names.map(str::len).max().unwrap_or(0).max("parser".len())
 }
 
 pub fn reference() -> Parser {

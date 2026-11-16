@@ -43,7 +43,7 @@ fn main() -> Result<(), String> {
             input.dialect
         );
         let data = input.read()?;
-        (parser.supports)(&input.dialect)
+        (parser.supports)(&input.dialect, &data)
             .map_err(|reason| format!("{} cannot parse this dialect: {reason}", parser.name))?;
 
         for record in (parser.records)(&input.dialect, &data, &Options::default())

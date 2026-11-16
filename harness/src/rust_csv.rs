@@ -20,7 +20,9 @@ use csv_parser::buffer::Buffer;
 use crate::{
     check::Digest,
     dialect::{Dialect, QuoteStyle, Terminator},
-    parsers::{Consumer, ErrorAt, Options, OwnedRecord, Parser, Prepared, Records, Statistics},
+    parsers::{
+        Consumer, ErrorAt, Errors, Options, OwnedRecord, Parser, Prepared, Records, Statistics,
+    },
 };
 
 pub fn parsers() -> [Parser; 2] {
@@ -28,19 +30,21 @@ pub fn parsers() -> [Parser; 2] {
         Parser {
             name: "csv-core/dfa",
             supports,
+            errors,
             prepare: prepare_core,
             records: core_records,
         },
         Parser {
             name: "csv/byte-record",
             supports,
+            errors,
             prepare: prepare_reader,
             records: reader_records,
         },
     ]
 }
 
-fn supports(d: &Dialect) -> Result<(), &'static str> {
+fn supports(d: &Dialect, _: &[u8]) -> Result<(), &'static str> {
     if d.quote.is_some() && d.quote_style == Some(QuoteStyle::Toggle) {
         return Err("toggle quoting");
     }
@@ -48,6 +52,10 @@ fn supports(d: &Dialect) -> Result<(), &'static str> {
         return Err("escapes in unquoted fields");
     }
     Ok(())
+}
+
+fn errors(_: &Dialect) -> Errors {
+    Errors::Never
 }
 
 fn terminator(d: &Dialect) -> CoreTerminator {

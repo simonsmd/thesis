@@ -106,14 +106,15 @@ fn main() -> Result<ExitCode, String> {
     }
     let unreadable = reports.iter().filter(|(_, r)| r.is_err()).count();
 
+    let width = parsers::name_width(parsers.iter().map(|p| p.name));
     println!(
-        "\n{:<40} {:>8} {:>9} {:>12}",
+        "\n{:<width$} {:>8} {:>9} {:>12}",
         "parser", "agree", "mismatch", "unsupported"
     );
     for parser in &parsers {
         if let Some([agree, mismatch, unsupported]) = counts.get(parser.name) {
             println!(
-                "{:<40} {agree:>8} {mismatch:>9} {unsupported:>12}",
+                "{:<width$} {agree:>8} {mismatch:>9} {unsupported:>12}",
                 parser.name
             );
         }
