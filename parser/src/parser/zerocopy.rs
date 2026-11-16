@@ -189,12 +189,6 @@ impl<R: Read, D: Dfa> ZeroCopyParser<R, D> {
                 read += 1;
 
                 if dfa.is_field_end(state) {
-                    if dfa.is_error(state) {
-                        // report the byte where the error occured which was not consumed
-                        read -= 1;
-                        break Exit::Error;
-                    }
-
                     // SAFETY: field < fields.end, checked after every write
                     unsafe {
                         field.write([field_start - record_start, write - record_start]);
@@ -205,6 +199,15 @@ impl<R: Read, D: Dfa> ZeroCopyParser<R, D> {
                     write = read;
 
                     if dfa.is_record_end(state) {
+                        // an error is also a record end
+                        if dfa.is_error(state) {
+                            // report the byte where the error occured which was not consumed and
+                            // do not count the field that was written for it
+                            read -= 1;
+                            // SAFETY: a field was written above
+                            field = unsafe { field.sub(1) };
+                            break Exit::Error;
+                        }
                         break Exit::EndRecord;
                     }
 
@@ -363,12 +366,6 @@ impl<R: Read, D: Dfa> ZeroCopyParser<R, D> {
                 /// record end and if the fields array needs to be resized
                 macro_rules! record_field {
                     ($end:expr) => {
-                        if dfa.is_error(state) {
-                            // report the byte where the error occured which was not consumed
-                            read -= 1;
-                            break 'core Exit::Error;
-                        }
-
                         // SAFETY: field < fields.end, checked after every write
                         unsafe {
                             (*field)[1] = $end;
@@ -376,6 +373,15 @@ impl<R: Read, D: Dfa> ZeroCopyParser<R, D> {
                         }
 
                         if dfa.is_record_end(state) {
+                            // an error is also a record end
+                            if dfa.is_error(state) {
+                                // report the byte where the error occured which was not consumed
+                                // and do not count the field that was written for it
+                                read -= 1;
+                                // SAFETY: a field was written above
+                                field = unsafe { field.sub(1) };
+                                break 'core Exit::Error;
+                            }
                             break 'core Exit::EndRecord;
                         }
 

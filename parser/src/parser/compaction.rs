@@ -191,12 +191,6 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
                 read += 1;
 
                 if dfa.is_field_end(state) {
-                    if dfa.is_error(state) {
-                        // report the byte where the error occured which was not consumed
-                        read -= 1;
-                        break Exit::Error;
-                    }
-
                     // SAFETY: field_end < fields.end, checked after every write
                     unsafe {
                         field_end.write(write - record_start);
@@ -204,6 +198,15 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
                     }
 
                     if dfa.is_record_end(state) {
+                        // an error is also a record end
+                        if dfa.is_error(state) {
+                            // report the byte where the error occured which was not consumed and
+                            // do not count the field that was written for it
+                            read -= 1;
+                            // SAFETY: a field was written above
+                            field_end = unsafe { field_end.sub(1) };
+                            break Exit::Error;
+                        }
                         break Exit::EndRecord;
                     }
 
@@ -335,6 +338,7 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
                 field_count += dfa.is_field_end(state) as usize;
 
                 if dfa.is_record_end(state) {
+                    // an error is also a record end
                     if dfa.is_error(state) {
                         // report the byte where the error occured which was not consumed
                         read -= 1;
@@ -493,12 +497,6 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
                     read += 1;
 
                     if dfa.is_field_end(state) {
-                        if dfa.is_error(state) {
-                            // report the byte where the error occured which was not consumed
-                            read -= 1;
-                            break 'core Exit::Error;
-                        }
-
                         // SAFETY: field_end < fields.end, checked after every write
                         unsafe {
                             field_end.write(write - record_start);
@@ -506,6 +504,15 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
                         }
 
                         if dfa.is_record_end(state) {
+                            // an error is also a record end
+                            if dfa.is_error(state) {
+                                // report the byte where the error occured which was not consumed
+                                // and do not count the field that was written for it
+                                read -= 1;
+                                // SAFETY: a field was written above
+                                field_end = unsafe { field_end.sub(1) };
+                                break 'core Exit::Error;
+                            }
                             break 'core Exit::EndRecord;
                         }
 
@@ -658,12 +665,6 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
                     read += 1;
 
                     if dfa.is_field_end(state) {
-                        if dfa.is_error(state) {
-                            // report the byte where the error occured which was not consumed
-                            read -= 1;
-                            break $core Exit::Error;
-                        }
-
                         // SAFETY: field_end < fields.end, checked after every write
                         unsafe {
                             field_end.write(write - record_start);
@@ -671,6 +672,15 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
                         }
 
                         if dfa.is_record_end(state) {
+                            // an error is also a record end
+                            if dfa.is_error(state) {
+                                // report the byte where the error occured which was not consumed
+                                // and do not count the field that was written for it
+                                read -= 1;
+                                // SAFETY: a field was written above
+                                field_end = unsafe { field_end.sub(1) };
+                                break $core Exit::Error;
+                            }
                             break $core Exit::EndRecord;
                         }
 
