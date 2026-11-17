@@ -15,12 +15,14 @@ csveee = { version = "0.2", optional = true }
 encoding_rs = "0.8"
 libc = "0.2"
 memmap2 = "0.9"
-perf-event2 = "0.7"
 rayon = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+perf-event2 = "0.7"
 
 [features]
 csveee = ["dep:csveee"]

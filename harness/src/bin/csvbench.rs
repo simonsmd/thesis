@@ -96,7 +96,7 @@ struct RunArgs {
     /// Read size of the parser buffers.
     #[arg(long, default_value = "64K")]
     capacity: Size,
-    /// Pin to this CPU. On hybrid CPUs pick a performance core.
+    /// Pin to this CPU (Linux only). On hybrid CPUs pick a performance core.
     #[arg(long)]
     cpu: Option<usize>,
     /// Do not read performance counters. On hybrid CPUs they need `--cpu`.
@@ -221,6 +221,9 @@ fn run(args: RunArgs) -> Result<(), String> {
     if let Some(cpu) = args.cpu {
         counters::pin_to(cpu).map_err(|e| format!("pinning to CPU {cpu}: {e}"))?;
     }
+    #[cfg(target_os = "macos")]
+    counters::prefer_performance_cores()
+        .map_err(|e| format!("asking for the performance cores: {e}"))?;
     let mut counters = if args.no_counters {
         None
     } else if args.cpu.is_none() && counters::is_hybrid() {

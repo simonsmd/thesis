@@ -1,7 +1,11 @@
 //! Performance counters around benchmark samples, and pinning to one CPU.
+//!
+//! Both need Linux. Elsewhere [`Counters::open`] and [`pin_to`] fail, and csvbench measures time
+//! only.
 
 use std::{fs, io};
 
+#[cfg(target_os = "linux")]
 use perf_event::{Builder, Counter, Group, events::Hardware};
 use serde::Serialize;
 
@@ -20,6 +24,7 @@ pub struct Reading {
 /// They count user space only, which is what `perf_event_paranoid = 2` allows for any event,
 /// software events included; scheduling is measured with [`Usage`] instead. Cycles and
 /// instructions have fixed counters, branches and branch misses take two general purpose ones.
+#[cfg(target_os = "linux")]
 pub struct Counters {
     group: Group,
     cycles: Counter,
@@ -28,6 +33,7 @@ pub struct Counters {
     branch_misses: Counter,
 }
 
+#[cfg(target_os = "linux")]
 impl Counters {
     /// `cpu` is the CPU the thread is pinned to, if any. On hybrid CPUs the generic hardware
     /// events have to be opened on that core type's PMU.
@@ -87,6 +93,28 @@ impl Counters {
     }
 }
 
+/// Without `perf_event_open` there are no counters: [`Counters::open`] always fails.
+#[cfg(not(target_os = "linux"))]
+pub struct Counters(std::convert::Infallible);
+
+#[cfg(not(target_os = "linux"))]
+impl Counters {
+    pub fn open(_cpu: Option<usize>) -> io::Result<Self> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "perf_event_open is only on Linux",
+        ))
+    }
+
+    pub fn start(&mut self) -> io::Result<()> {
+        match self.0 {}
+    }
+
+    pub fn stop(&mut self) -> io::Result<Reading> {
+        match self.0 {}
+    }
+}
+
 /// What the scheduler did to this thread during a sample, from the kernel's own accounting, which
 /// needs no perf permissions.
 #[derive(Debug, Clone, Copy, Default, Serialize)]
@@ -110,7 +138,12 @@ impl Usage {
             let mut time: libc::timespec = std::mem::zeroed();
             libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut time);
             let mut usage: libc::rusage = std::mem::zeroed();
+            // macOS has no per-thread usage; the whole process is the same while csvbench
+            // measures on one thread
+            #[cfg(target_os = "linux")]
             libc::getrusage(libc::RUSAGE_THREAD, &mut usage);
+            #[cfg(not(target_os = "linux"))]
+            libc::getrusage(libc::RUSAGE_SELF, &mut usage);
             Usage {
                 cpu_time: time.tv_sec as u64 * 1_000_000_000 + time.tv_nsec as u64,
                 involuntary_switches: usage.ru_nivcsw as u64,
@@ -139,6 +172,7 @@ pub fn is_hybrid() -> bool {
 }
 
 /// The perf type of the core PMU that `cpu` belongs to, on hybrid CPUs (`cpu_core`/`cpu_atom`).
+#[cfg(target_os = "linux")]
 fn hybrid_pmu_type(cpu: usize) -> Option<u32> {
     for pmu in ["cpu_core", "cpu_atom"] {
         let dir = format!("/sys/bus/event_source/devices/{pmu}");
@@ -157,6 +191,7 @@ fn hybrid_pmu_type(cpu: usize) -> Option<u32> {
 }
 
 /// Whether a kernel CPU list like `0-15,18` contains `cpu`.
+#[cfg(target_os = "linux")]
 fn cpu_list_contains(list: &str, cpu: usize) -> bool {
     list.trim().split(',').any(|range| match range.split_once('-') {
         Some((lo, hi)) => matches!((lo.parse::<usize>(), hi.parse::<usize>()), (Ok(lo), Ok(hi)) if (lo..=hi).contains(&cpu)),
@@ -165,6 +200,7 @@ fn cpu_list_contains(list: &str, cpu: usize) -> bool {
 }
 
 /// Pin the calling thread to one CPU.
+#[cfg(target_os = "linux")]
 pub fn pin_to(cpu: usize) -> io::Result<()> {
     // SAFETY: cpu_set_t is plain data, initialised by CPU_ZERO before use
     unsafe {
@@ -176,6 +212,29 @@ pub fn pin_to(cpu: usize) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// macOS cannot pin threads to a CPU.
+#[cfg(not(target_os = "linux"))]
+pub fn pin_to(_cpu: usize) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "pinning to a CPU is only possible on Linux",
+    ))
+}
+
+/// Ask macOS to run the calling thread on the performance cores. It cannot be pinned, but the
+/// highest quality of service class keeps it off the efficiency cores while they are free.
+#[cfg(target_os = "macos")]
+pub fn prefer_performance_cores() -> io::Result<()> {
+    // SAFETY: only changes the scheduling class of the calling thread
+    let error = unsafe {
+        libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE, 0)
+    };
+    match error {
+        0 => Ok(()),
+        e => Err(io::Error::from_raw_os_error(e)),
+    }
 }
 
 #[cfg(test)]
@@ -208,6 +267,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn hardware_counters_count_when_pinned() {
         // unpinned, the thread could move between core types mid-measurement
         // SAFETY: plain libc call without arguments
@@ -231,6 +291,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn cpu_lists() {
         assert!(cpu_list_contains("0-15\n", 3));
         assert!(cpu_list_contains("0-3,16,18-19", 16));

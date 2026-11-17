@@ -117,7 +117,8 @@ pub fn system(cpu: Option<usize>) -> System {
         })
         .collect();
 
-    System {
+    #[allow(unused_mut)]
+    let mut system = System {
         hostname: read("/proc/sys/kernel/hostname"),
         os: read("/etc/os-release").and_then(|text| {
             let name = text
@@ -158,8 +159,63 @@ pub fn system(cpu: Option<usize>) -> System {
         ),
         perf_event_paranoid: read("/proc/sys/kernel/perf_event_paranoid")
             .and_then(|v| v.parse().ok()),
-        load_at_start: read("/proc/loadavg").and_then(|text| text.split(' ').next()?.parse().ok()),
-    }
+        load_at_start: load_average(),
+    };
+    #[cfg(target_os = "macos")]
+    fill_from_sysctl(&mut system);
+    system
+}
+
+fn load_average() -> Option<f64> {
+    let mut load = 0.0;
+    // SAFETY: writes one double
+    (unsafe { libc::getloadavg(&mut load, 1) } == 1).then_some(load)
+}
+
+/// A `sysctl` value. macOS has no `/proc` or `/sys`, it keeps the machine's details there.
+#[cfg(target_os = "macos")]
+fn sysctl(name: &str) -> Option<String> {
+    let out = std::process::Command::new("sysctl")
+        .args(["-n", name])
+        .output()
+        .ok()?;
+    let value = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    (out.status.success() && !value.is_empty()).then_some(value)
+}
+
+/// The fields macOS has, from `sysctl` and `sw_vers`. The caches are those of the performance
+/// cores, where csvbench asks to run.
+#[cfg(target_os = "macos")]
+fn fill_from_sysctl(system: &mut System) {
+    let number = |name: &str| sysctl(name)?.parse::<u64>().ok();
+    let sw_vers = |arg: &str| {
+        let out = std::process::Command::new("sw_vers")
+            .arg(arg)
+            .output()
+            .ok()?;
+        Some(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+    };
+    system.hostname = sysctl("kern.hostname");
+    system.os = match (sw_vers("-productVersion"), sw_vers("-buildVersion")) {
+        (Some(version), Some(build)) => Some(format!("macOS {version} ({build})")),
+        (Some(version), None) => Some(format!("macOS {version}")),
+        _ => None,
+    };
+    system.kernel = sysctl("kern.osrelease");
+    system.cpu_model = sysctl("machdep.cpu.brand_string");
+    system.virtual_machine = sysctl("kern.hv_vmm_present").map(|v| v == "1");
+    system.memory_kb = number("hw.memsize").map(|bytes| bytes / 1024);
+    let cache = |level, kind: &str, name: &str, shared: &str| Cache {
+        level: Some(level),
+        kind: Some(kind.to_owned()),
+        size: number(&format!("hw.perflevel0.{name}")).map(|b| format!("{}K", b / 1024)),
+        shared_by: sysctl(&format!("hw.perflevel0.{shared}")).map(|n| format!("{n} cpus")),
+    };
+    system.caches = vec![
+        cache(1, "Data", "l1dcachesize", "cpusperl1"),
+        cache(1, "Instruction", "l1icachesize", "cpusperl1"),
+        cache(2, "Unified", "l2cachesize", "cpusperl2"),
+    ];
 }
 
 /// The current UTC time as `2026-10-12T13:04:05Z`.
