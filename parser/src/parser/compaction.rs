@@ -291,9 +291,9 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
                 }
 
                 // resize field_ends if there is not enough space for the maximum possible amount
-                // of fields (one per input byte)
+                // of fields (one per input byte) in addition to the existing fields.
                 if self.field_ends.len() - field_count < self.buffer.len() {
-                    self.field_ends.resize(self.buffer.capacity(), 0);
+                    self.field_ends.resize(field_count + self.buffer.len(), 0);
                 }
 
                 if read == 0 {
