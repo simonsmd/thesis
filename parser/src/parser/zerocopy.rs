@@ -167,8 +167,6 @@ impl<R: Read, D: Dfa> ZeroCopyParser<R, D> {
                     buffer[write] = byte;
                 }
 
-                // TODO: break dependency chain between this update and write update since write
-                // update can use old value of field_not_started
                 field_not_started &= dfa.is_discard(state);
 
                 // update the write pointer using one adc instruction with the field_not_started

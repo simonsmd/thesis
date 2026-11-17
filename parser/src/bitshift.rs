@@ -39,10 +39,15 @@ pub fn is_field_emit(state: u64) -> bool {
 impl BitshiftDfa {
     fn build_transition_table(&mut self, config: &Config) {
         use State::*;
-        // Error does not fit and needs to be handled with a branch
-        // TODO: its possible to have error be a proper state by reversing the order of the
-        // states so that error can loop to itself because even with the limited bits
-        // available it can still transition to the first few states.
+        // Error only has a state representation/number in the table but no valid entry in the
+        // transition table for the next state because only 10 states fit into the 64 bit wide rows
+        // of the bitshift transition table (6 bits per state). This does not matter because the
+        // error state can be considered a field/record end since it aborts parsing anyways and so
+        // the error check on the fast path is free (included in the field end check). Only on a
+        // record end it costs one well predicted branch that is needed anyways for reporting the
+        // correct error position without backtracking as well as one check if the parser is in the
+        // error state when starting a new record which is also already there to check for previous
+        // IO errors.
         const STATES: [State; 10] = [
             StartRecord,
             InField,

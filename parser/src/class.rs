@@ -38,15 +38,18 @@ pub fn is_field_emit(state: usize) -> bool {
 
 impl ClassDfa {
     // each equivalence class besides the non structural bytes has only one byte per class
-    // TODO: does it make sense to have \r and \n in the same class in CRLF mode
     fn add_equivalence_class(&mut self, b: u8) {
-        // class indices start 1 since the default class for all non structural bytes is 0
+        // class indices start at 1 since the default class for all non structural bytes is 0
         self.class_index += 1;
 
         if self.class_index >= NUM_EQUIVALENCE_CLASSES as u8 {
             panic!("too many equivalence classes");
         }
 
+        debug_assert_eq!(
+            self.class_table[b as usize], 0,
+            "equivalence classes must be distinct (byte {b} already has a class)"
+        );
         self.class_table[b as usize] = self.class_index;
     }
 
@@ -94,8 +97,14 @@ impl ClassDfa {
             for state in STATES {
                 let (next_state, _) = transition_next_state(config, state, b);
                 let class = self.class_table[b as usize];
-                // TODO: debug_assert that no conflicting entries are written to catch errors in
-                // the equivalence class table
+                debug_assert!(
+                    {
+                        let entry =
+                            self.transition_table[class as usize][state_to_index(state) as usize];
+                        entry == 0 || entry == state_to_index(next_state)
+                    },
+                    "byte {b} has a different transition than another byte in its class {class}"
+                );
                 self.transition_table[class as usize][state_to_index(state) as usize] =
                     state_to_index(next_state);
             }
