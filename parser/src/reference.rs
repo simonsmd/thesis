@@ -161,6 +161,11 @@ impl Dfa for ReferenceDfa {
     }
 
     #[inline(always)]
+    fn is_record_start(&self, (state, _): Self::State) -> bool {
+        matches!(state, State::StartRecord | State::InComment)
+    }
+
+    #[inline(always)]
     fn in_quoted_field(&self, (state, _): Self::State) -> bool {
         matches!(
             state,

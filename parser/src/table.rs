@@ -120,6 +120,12 @@ impl Dfa for TableDfa {
     }
 
     #[inline(always)]
+    fn is_record_start(&self, state: Self::State) -> bool {
+        state == state_to_index(State::StartRecord) as usize
+            || state == state_to_index(State::InComment) as usize
+    }
+
+    #[inline(always)]
     fn in_quoted_field(&self, state: Self::State) -> bool {
         state == state_to_index(State::InQuotedFieldOutput) as usize
             || state == state_to_index(State::InQuotedFieldDiscard) as usize

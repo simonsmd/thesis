@@ -48,6 +48,10 @@ pub trait Dfa {
 
     fn is_error(&self, state: Self::State) -> bool;
 
+    /// Check if no record has started yet which is the case if the DFA is in the `StartRecord` or
+    /// `InComment` state.
+    fn is_record_start(&self, state: Self::State) -> bool;
+
     fn in_quoted_field(&self, state: Self::State) -> bool;
 
     fn in_escape_sequence(&self, state: Self::State) -> bool;

@@ -120,6 +120,11 @@ impl Dfa for BitshiftDfa {
     }
 
     #[inline(always)]
+    fn is_record_start(&self, (_, state): Self::State) -> bool {
+        state == state_to_offset(State::StartRecord) || state == state_to_offset(State::InComment)
+    }
+
+    #[inline(always)]
     fn in_quoted_field(&self, (_, state): Self::State) -> bool {
         state == state_to_offset(State::InQuotedFieldOutput)
             || state == state_to_offset(State::InQuotedFieldDiscard)

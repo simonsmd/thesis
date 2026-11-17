@@ -128,7 +128,8 @@ impl<R: Read, D: Dfa> ZeroCopyParser<R, D> {
                         break true;
                     }
 
-                    if write == field_start && field_count == 0 {
+                    // end of input with no pending record
+                    if self.dfa.is_record_start(state) {
                         return Ok(None);
                     }
 
@@ -316,7 +317,8 @@ impl<R: Read, D: Dfa> ZeroCopyParser<R, D> {
 
                     let (start, end) = match phase {
                         Phase::Start => {
-                            if field_count == 0 {
+                            // end of input with no pending record
+                            if self.dfa.is_record_start(state) {
                                 return Ok(None);
                             }
                             (self.read_index, self.read_index)

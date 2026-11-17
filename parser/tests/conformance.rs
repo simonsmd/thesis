@@ -248,6 +248,15 @@ fn quoted_empty_field_vs_blank_line() {
 }
 
 #[test]
+fn quoted_empty_field_at_eof() {
+    // Still a record without a terminator; a comment or blank lines at the end are not.
+    let config = Config::new();
+    assert_eq!(parse(&config, b"a\n\"\""), rows(&[&["a"], &[""]]));
+    assert_eq!(parse(&config, b"a\n#x"), rows(&[&["a"]]));
+    assert_eq!(parse(&config, b"a\n\n"), rows(&[&["a"]]));
+}
+
+#[test]
 fn doubled_quote_escape() {
     // "a""b" -> a"b  (RFC 4180 doubling)
     let config = Config::new();

@@ -159,7 +159,8 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
                         break true;
                     }
 
-                    if write == record_start && field_count == 0 {
+                    // end of input with no pending record
+                    if self.dfa.is_record_start(state) {
                         return Ok(None);
                     }
 
@@ -304,7 +305,8 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
                         break true;
                     }
 
-                    if write == record_start && field_count == 0 {
+                    // end of input with no pending record
+                    if self.dfa.is_record_start(state) {
                         return Ok(None);
                     }
 
@@ -435,7 +437,8 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
                         break true;
                     }
 
-                    if write == record_start && field_count == 0 {
+                    // end of input with no pending record
+                    if self.dfa.is_record_start(state) {
                         return Ok(None);
                     }
 
@@ -628,7 +631,8 @@ impl<R: Read, D: Dfa> CompactionParser<R, D> {
                         break true;
                     }
 
-                    if write == record_start && field_count == 0 {
+                    // end of input with no pending record
+                    if self.dfa.is_record_start(state) {
                         return Ok(None);
                     }
 
